@@ -133,26 +133,3 @@ pub use error::{SbfError, SbfResult};
 pub use header::{SbfHeader, SBF_SYNC};
 pub use reader::{ReaderStats, SbfReadExt, SbfReader};
 pub use types::{Constellation, PvtError, PvtMode, SatelliteId, SignalType};
-
-/// Library version
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// SBF sync bytes
-pub const SYNC_BYTES: [u8; 2] = SBF_SYNC;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_version() {
-        let parts: Vec<_> = VERSION.split('.').collect();
-        assert_eq!(parts.len(), 3);
-        assert!(parts.iter().all(|part| !part.is_empty()));
-    }
-
-    #[test]
-    fn test_sync_bytes() {
-        assert_eq!(SYNC_BYTES, [0x24, 0x40]);
-    }
-}
