@@ -2,6 +2,7 @@
 //!
 //! Provides `SbfReader` for reading SBF blocks from any `Read` source.
 
+use std::collections::VecDeque;
 use std::io::Read;
 
 use crate::blocks::SbfBlock;
@@ -37,9 +38,7 @@ const MAX_BUFFER_SIZE: usize = 131072;
 /// ```
 pub struct SbfReader<R: Read> {
     inner: R,
-    buffer: Vec<u8>,
-    /// Number of valid bytes in buffer
-    valid_bytes: usize,
+    buffer: VecDeque<u8>,
     /// Whether to validate CRC
     validate_crc: bool,
     /// Statistics
@@ -66,8 +65,7 @@ impl<R: Read> SbfReader<R> {
     pub fn new(reader: R) -> Self {
         Self {
             inner: reader,
-            buffer: Vec::with_capacity(DEFAULT_BUFFER_CAPACITY),
-            valid_bytes: 0,
+            buffer: VecDeque::with_capacity(DEFAULT_BUFFER_CAPACITY),
             validate_crc: true,
             stats: ReaderStats::default(),
         }
@@ -77,8 +75,7 @@ impl<R: Read> SbfReader<R> {
     pub fn with_capacity(reader: R, capacity: usize) -> Self {
         Self {
             inner: reader,
-            buffer: Vec::with_capacity(capacity),
-            valid_bytes: 0,
+            buffer: VecDeque::with_capacity(capacity),
             validate_crc: true,
             stats: ReaderStats::default(),
         }
@@ -113,7 +110,6 @@ impl<R: Read> SbfReader<R> {
                 if sync_pos > 0 {
                     self.stats.bytes_skipped += sync_pos as u64;
                     self.buffer.drain(0..sync_pos);
-                    self.valid_bytes -= sync_pos;
                 }
 
                 // Try to parse block
@@ -121,7 +117,6 @@ impl<R: Read> SbfReader<R> {
                     Ok(Some((block, consumed))) => {
                         // Remove consumed bytes
                         self.buffer.drain(0..consumed);
-                        self.valid_bytes -= consumed;
                         self.stats.blocks_parsed += 1;
                         return Ok(Some(block));
                     }
@@ -129,11 +124,11 @@ impl<R: Read> SbfReader<R> {
                         // Need more data
                         if !self.fill_buffer()? {
                             // EOF reached
-                            if self.valid_bytes > 0 {
+                            if self.buffer.len() > 0 {
                                 // Partial data at end
                                 return Err(SbfError::IncompleteBlock {
                                     needed: 8,
-                                    have: self.valid_bytes,
+                                    have: self.buffer.len(),
                                 });
                             }
                             return Ok(None);
@@ -142,20 +137,17 @@ impl<R: Read> SbfReader<R> {
                     Err(SbfError::InvalidSync) => {
                         // Skip one byte and try again
                         self.buffer.remove(0);
-                        self.valid_bytes -= 1;
                         self.stats.bytes_skipped += 1;
                     }
                     Err(SbfError::CrcMismatch { .. }) => {
                         // CRC error - skip sync and continue
                         self.buffer.remove(0);
-                        self.valid_bytes -= 1;
                         self.stats.crc_errors += 1;
                         self.stats.bytes_skipped += 1;
                     }
                     Err(_e) => {
                         // Other parse error - skip sync and continue
                         self.buffer.remove(0);
-                        self.valid_bytes -= 1;
                         self.stats.parse_errors += 1;
                         self.stats.bytes_skipped += 1;
                         // Continue to next potential sync
@@ -175,35 +167,32 @@ impl<R: Read> SbfReader<R> {
 
     /// Find sync bytes in buffer
     fn find_sync(&self) -> Option<usize> {
-        if self.valid_bytes < 2 {
+        if self.buffer.len() < 2 {
             return None;
         }
 
-        (0..(self.valid_bytes - 1))
+        (0..(self.buffer.len() - 1))
             .find(|&i| self.buffer[i] == SBF_SYNC[0] && self.buffer[i + 1] == SBF_SYNC[1])
     }
 
     /// Try to parse a block from the current buffer position
     fn try_parse_block(&mut self) -> SbfResult<Option<(SbfBlock, usize)>> {
-        if self.valid_bytes < 8 {
+        if self.buffer.len() < 8 {
             return Ok(None);
         }
 
-        // Verify sync
-        if self.buffer[0] != SBF_SYNC[0] || self.buffer[1] != SBF_SYNC[1] {
-            return Err(SbfError::InvalidSync);
-        }
+        let buffer = self.buffer.make_contiguous();
 
         // Parse header
-        let header = SbfHeader::parse(&self.buffer[2..])?;
+        let header = SbfHeader::parse(&buffer[2..])?;
         let total_len = header.length as usize;
 
-        if self.valid_bytes < total_len {
+        if buffer.len() < total_len {
             return Ok(None);
         }
 
         // Validate CRC if enabled
-        if self.validate_crc && !validate_block(&self.buffer[..total_len]) {
+        if self.validate_crc && !validate_block(&buffer[..total_len]) {
             // Get stored and calculated CRC for error message
             let stored_crc = u16::from_le_bytes([self.buffer[2], self.buffer[3]]);
             return Err(SbfError::CrcMismatch {
@@ -213,28 +202,18 @@ impl<R: Read> SbfReader<R> {
         }
 
         // Parse block
-        let (block, consumed) = SbfBlock::parse(&self.buffer[..total_len])?;
+        let (block, consumed) = SbfBlock::parse(&buffer[..total_len])?;
 
         Ok(Some((block, consumed)))
     }
 
     /// Fill buffer from source
     fn fill_buffer(&mut self) -> SbfResult<bool> {
-        // Ensure we have room
-        if self.buffer.len() < self.valid_bytes + 4096 {
-            self.buffer.resize(self.valid_bytes + 4096, 0);
-        }
-
         let mut temp = [0u8; 4096];
         match self.inner.read(&mut temp) {
             Ok(0) => Ok(false), // EOF
             Ok(n) => {
-                // Append to buffer
-                if self.buffer.len() < self.valid_bytes + n {
-                    self.buffer.resize(self.valid_bytes + n, 0);
-                }
-                self.buffer[self.valid_bytes..self.valid_bytes + n].copy_from_slice(&temp[..n]);
-                self.valid_bytes += n;
+                self.buffer.extend(&temp[..n]);
                 self.stats.bytes_read += n as u64;
                 Ok(true)
             }
@@ -246,8 +225,7 @@ impl<R: Read> SbfReader<R> {
 
     /// Trim buffer if too large
     fn trim_buffer(&mut self) {
-        if self.buffer.len() > MAX_BUFFER_SIZE && self.valid_bytes < MAX_BUFFER_SIZE / 2 {
-            self.buffer.truncate(self.valid_bytes);
+        if self.buffer.capacity() > MAX_BUFFER_SIZE && self.buffer.len() < MAX_BUFFER_SIZE / 2 {
             self.buffer.shrink_to_fit();
         }
     }
