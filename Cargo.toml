@@ -1,6 +1,6 @@
 [package]
 name = "sbf-tools"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Septentrio Binary Format (SBF) parser library"
 license = "MIT"

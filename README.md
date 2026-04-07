@@ -1,6 +1,6 @@
-# SBF
+# SBF Tools
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.1-blue)](Cargo.toml)
 
 Rust parser for Septentrio Binary Format.
 
@@ -26,14 +26,14 @@ The Cargo package is `sbf-tools`, and the Rust crate name is `sbf_tools`:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.1.0" }
+sbf_tools = { package = "sbf-tools", version = "0.1.1" }
 ```
 
 With the optional `serde` feature:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.1.0", features = ["serde"] }
+sbf_tools = { package = "sbf-tools", version = "0.1.1", features = ["serde"] }
 ```
 
 ## Quick start
