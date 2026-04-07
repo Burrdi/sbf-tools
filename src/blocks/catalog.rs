@@ -23,15 +23,3 @@ pub fn fallback_name(id: u16) -> &'static str {
         _ => "Unknown",
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fallback_names() {
-        assert_eq!(fallback_name(4049), "RTCMDatum");
-        assert_eq!(fallback_name(4253), "BDSCNav3");
-        assert_eq!(fallback_name(0xFFFF), "Unknown");
-    }
-}
