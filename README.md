@@ -30,14 +30,14 @@ The Cargo package is `sbf-tools`, and the Rust crate name is `sbf_tools`:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.2.0" }
+sbf_tools = { package = "sbf-tools", version = "0.2.1" }
 ```
 
 With the optional `serde` feature:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.2.0", features = ["serde"] }
+sbf_tools = { package = "sbf-tools", version = "0.2.1", features = ["serde"] }
 ```
 
 ## Quick start
