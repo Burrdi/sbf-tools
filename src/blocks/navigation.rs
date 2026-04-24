@@ -1496,6 +1496,73 @@ impl SbfBlockParse for GalGstGpsBlock {
 }
 
 // ============================================================================
+// GALAuthStatus Block
+// ============================================================================
+
+/// GALAuthStatus (4245) — Galileo OSNMA authentication status.
+#[derive(Debug, Clone)]
+pub struct GalAuthStatusBlock {
+    tow_ms: u32,
+    wnc: u16,
+    /// OSNMA status bitfield (see Septentrio SBF reference: Status, progress, time source, …).
+    pub osnma_status: u16,
+    /// Trusted time delta (seconds).
+    pub trusted_time_delta: f32,
+    /// Galileo active authentication mask (64 bit).
+    pub gal_active_mask: u64,
+    /// Galileo authentic mask (64 bit).
+    pub gal_authentic_mask: u64,
+    /// GPS active authentication mask (64 bit).
+    pub gps_active_mask: u64,
+    /// GPS authentic mask (64 bit).
+    pub gps_authentic_mask: u64,
+}
+
+impl GalAuthStatusBlock {
+    pub fn tow_ms(&self) -> u32 {
+        self.tow_ms
+    }
+    pub fn wnc(&self) -> u16 {
+        self.wnc
+    }
+    pub fn tow_seconds(&self) -> f64 {
+        self.tow_ms as f64 * 0.001
+    }
+
+    pub fn trusted_time_delta_s(&self) -> Option<f32> {
+        f32_or_none(self.trusted_time_delta)
+    }
+}
+
+impl SbfBlockParse for GalAuthStatusBlock {
+    const BLOCK_ID: u16 = block_ids::GAL_AUTH_STATUS;
+
+    fn parse(header: &SbfHeader, data: &[u8]) -> SbfResult<Self> {
+        if data.len() < 50 {
+            return Err(SbfError::ParseError("GALAuthStatus too short".into()));
+        }
+
+        let osnma_status = u16::from_le_bytes([data[12], data[13]]);
+        let trusted_time_delta = f32::from_le_bytes(data[14..18].try_into().unwrap());
+        let gal_active_mask = u64::from_le_bytes(data[18..26].try_into().unwrap());
+        let gal_authentic_mask = u64::from_le_bytes(data[26..34].try_into().unwrap());
+        let gps_active_mask = u64::from_le_bytes(data[34..42].try_into().unwrap());
+        let gps_authentic_mask = u64::from_le_bytes(data[42..50].try_into().unwrap());
+
+        Ok(Self {
+            tow_ms: header.tow_ms,
+            wnc: header.wnc,
+            osnma_status,
+            trusted_time_delta,
+            gal_active_mask,
+            gal_authentic_mask,
+            gps_active_mask,
+            gps_authentic_mask,
+        })
+    }
+}
+
+// ============================================================================
 // GALSARRLM Block
 // ============================================================================
 

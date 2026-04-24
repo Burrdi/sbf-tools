@@ -171,6 +171,60 @@ impl SbfBlockParse for BdsRawB2aBlock {
     }
 }
 
+/// BDSRawB2b (4242) — BeiDou B2b navigation frame.
+#[derive(Debug, Clone)]
+pub struct BdsRawB2bBlock {
+    tow_ms: u32,
+    wnc: u16,
+    pub svid: u8,
+    pub crc_passed: u8,
+    pub reserved1: u8,
+    pub source: u8,
+    pub reserved2: u8,
+    pub rx_channel: u8,
+    /// `31` × `u32` = 124 bytes.
+    pub nav_bits: [u8; 124],
+}
+
+impl BdsRawB2bBlock {
+    pub fn tow_ms(&self) -> u32 {
+        self.tow_ms
+    }
+    pub fn wnc(&self) -> u16 {
+        self.wnc
+    }
+    pub fn tow_seconds(&self) -> f64 {
+        self.tow_ms as f64 * 0.001
+    }
+    pub fn crc_ok(&self) -> bool {
+        self.crc_passed != 0
+    }
+}
+
+impl SbfBlockParse for BdsRawB2bBlock {
+    const BLOCK_ID: u16 = block_ids::BDS_RAW_B2B;
+
+    fn parse(header: &SbfHeader, data: &[u8]) -> SbfResult<Self> {
+        const MIN: usize = 142;
+        if data.len() < MIN {
+            return Err(SbfError::ParseError("BDSRawB2b too short".into()));
+        }
+        let mut nav_bits = [0u8; 124];
+        nav_bits.copy_from_slice(&data[18..142]);
+        Ok(Self {
+            tow_ms: header.tow_ms,
+            wnc: header.wnc,
+            svid: data[12],
+            crc_passed: data[13],
+            reserved1: data[14],
+            source: data[15],
+            reserved2: data[16],
+            rx_channel: data[17],
+            nav_bits,
+        })
+    }
+}
+
 /// IRNSSRaw / NAVICRaw (4093) — NavIC/IRNSS subframe.
 #[derive(Debug, Clone)]
 pub struct IrnssRawBlock {

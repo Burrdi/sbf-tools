@@ -62,6 +62,7 @@ pub use blocks::{
     BdsNavBlock,
     BdsRawB1cBlock,
     BdsRawB2aBlock,
+    BdsRawB2bBlock,
     BdsUtcBlock,
     // Status
     ChannelStatusBlock,
@@ -76,6 +77,7 @@ pub use blocks::{
     ExtEventAttEulerBlock,
     ExtEventBaseVectGeodBlock,
     // Navigation
+    GalAuthStatusBlock,
     GalNavBlock,
     GeoRawL5Block,
     GisActionBlock,

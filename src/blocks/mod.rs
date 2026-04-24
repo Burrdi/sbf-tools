@@ -137,6 +137,10 @@ pub mod block_ids {
     pub const GEO_RAW_L5: u16 = 4021;
     pub const BDS_RAW_B1C: u16 = 4218;
     pub const BDS_RAW_B2A: u16 = 4219;
+    /// BeiDou B2b navigation frame
+    pub const BDS_RAW_B2B: u16 = 4242;
+    /// Galileo OSNMA authentication status
+    pub const GAL_AUTH_STATUS: u16 = 4245;
     pub const NAVIC_RAW: u16 = 4093;
     pub const GEO_IONO_DELAY: u16 = 5933;
     pub const GEO_MT00: u16 = 5925;
@@ -328,6 +332,8 @@ pub fn block_name(id: u16) -> &'static str {
         block_ids::GEO_RAW_L5 => "GEORawL5",
         block_ids::BDS_RAW_B1C => "BDSRawB1C",
         block_ids::BDS_RAW_B2A => "BDSRawB2a",
+        block_ids::BDS_RAW_B2B => "BDSRawB2b",
+        block_ids::GAL_AUTH_STATUS => "GALAuthStatus",
         block_ids::NAVIC_RAW => "NAVICRaw",
         block_ids::RTCM_DATUM => "RTCMDatum",
         block_ids::LBAND_BEAMS => "LBandBeams",
@@ -372,7 +378,12 @@ pub trait SbfBlockParse: Sized {
 // Main Block Enum
 // ============================================================================
 
-/// Parsed SBF block variants
+/// Parsed SBF block variants.
+///
+/// This enum is [`non_exhaustive`]: new block types may appear in any minor release.
+/// Code outside this crate that matches on [`SbfBlock`](Self) should include a wildcard
+/// pattern (for example `_ =>` or a catch-all) so it keeps compiling as variants are added.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum SbfBlock {
     // Measurement blocks
@@ -424,6 +435,7 @@ pub enum SbfBlock {
     GalIon(GalIonBlock),
     GalUtc(GalUtcBlock),
     GalGstGps(GalGstGpsBlock),
+    GalAuthStatus(GalAuthStatusBlock),
     GalSarRlm(GalSarRlmBlock),
     GloNav(GloNavBlock),
     GloAlm(GloAlmBlock),
@@ -450,6 +462,7 @@ pub enum SbfBlock {
     CmpRaw(CmpRawBlock),
     BdsRawB1c(BdsRawB1cBlock),
     BdsRawB2a(BdsRawB2aBlock),
+    BdsRawB2b(BdsRawB2bBlock),
     IrnssRaw(IrnssRawBlock),
     QzsRawL1Ca(QzsRawL1CaBlock),
     QzsRawL2C(QzsRawL2CBlock),
@@ -667,6 +680,9 @@ impl SbfBlock {
             block_ids::GAL_GST_GPS => {
                 SbfBlock::GalGstGps(GalGstGpsBlock::parse(&header, block_data)?)
             }
+            block_ids::GAL_AUTH_STATUS => {
+                SbfBlock::GalAuthStatus(GalAuthStatusBlock::parse(&header, block_data)?)
+            }
             block_ids::GAL_SAR_RLM => {
                 SbfBlock::GalSarRlm(GalSarRlmBlock::parse(&header, block_data)?)
             }
@@ -708,6 +724,9 @@ impl SbfBlock {
             }
             block_ids::BDS_RAW_B2A => {
                 SbfBlock::BdsRawB2a(BdsRawB2aBlock::parse(&header, block_data)?)
+            }
+            block_ids::BDS_RAW_B2B => {
+                SbfBlock::BdsRawB2b(BdsRawB2bBlock::parse(&header, block_data)?)
             }
             block_ids::NAVIC_RAW => SbfBlock::IrnssRaw(IrnssRawBlock::parse(&header, block_data)?),
             block_ids::QZS_RAW_L1CA => {
@@ -934,6 +953,7 @@ impl SbfBlock {
             SbfBlock::GalIon(_) => block_ids::GAL_ION,
             SbfBlock::GalUtc(_) => block_ids::GAL_UTC,
             SbfBlock::GalGstGps(_) => block_ids::GAL_GST_GPS,
+            SbfBlock::GalAuthStatus(_) => block_ids::GAL_AUTH_STATUS,
             SbfBlock::GalSarRlm(_) => block_ids::GAL_SAR_RLM,
             SbfBlock::GloNav(_) => block_ids::GLO_NAV,
             SbfBlock::GloAlm(_) => block_ids::GLO_ALM,
@@ -960,6 +980,7 @@ impl SbfBlock {
             SbfBlock::CmpRaw(_) => block_ids::CMP_RAW,
             SbfBlock::BdsRawB1c(_) => block_ids::BDS_RAW_B1C,
             SbfBlock::BdsRawB2a(_) => block_ids::BDS_RAW_B2A,
+            SbfBlock::BdsRawB2b(_) => block_ids::BDS_RAW_B2B,
             SbfBlock::IrnssRaw(_) => block_ids::NAVIC_RAW,
             SbfBlock::QzsRawL1Ca(_) => block_ids::QZS_RAW_L1CA,
             SbfBlock::QzsRawL2C(_) => block_ids::QZS_RAW_L2C,
@@ -1104,6 +1125,65 @@ mod tests {
                 assert!((pvt.tow_seconds() - 123.456).abs() < 1e-6);
             }
             other => panic!("expected PvtSupport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bds_raw_b2b_min_block_parse() {
+        let total_len: u16 = 144; // 2 sync + 142 block bytes (B2b min)
+        let mut data = vec![0u8; total_len as usize];
+        data[0] = 0x24;
+        data[1] = 0x40;
+        let id_rev = block_ids::BDS_RAW_B2B;
+        data[4..6].copy_from_slice(&id_rev.to_le_bytes());
+        data[6..8].copy_from_slice(&total_len.to_le_bytes());
+        data[8..12].copy_from_slice(&1_000u32.to_le_bytes());
+        data[12..14].copy_from_slice(&200u16.to_le_bytes());
+        data[14] = 5;
+        data[15] = 1;
+
+        let (block, consumed) = SbfBlock::parse(&data).unwrap();
+        assert_eq!(consumed, total_len as usize);
+        match block {
+            SbfBlock::BdsRawB2b(b) => {
+                assert_eq!(b.tow_ms(), 1_000);
+                assert_eq!(b.wnc(), 200);
+                assert_eq!(b.svid, 5);
+            }
+            other => panic!("expected BdsRawB2b, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_gal_auth_status_min_block_parse() {
+        let total_len: u16 = 52;
+        let mut data = vec![0u8; total_len as usize];
+        data[0] = 0x24;
+        data[1] = 0x40;
+        let id_rev = block_ids::GAL_AUTH_STATUS;
+        data[4..6].copy_from_slice(&id_rev.to_le_bytes());
+        data[6..8].copy_from_slice(&total_len.to_le_bytes());
+        data[8..12].copy_from_slice(&2_000u32.to_le_bytes());
+        data[12..14].copy_from_slice(&201u16.to_le_bytes());
+        data[14..16].copy_from_slice(&0xABCDu16.to_le_bytes());
+        data[16..20].copy_from_slice(&1.5f32.to_le_bytes());
+        for i in 0..8usize {
+            data[20 + i] = 0x10 + i as u8;
+            data[28 + i] = 0x20 + i as u8;
+            data[36 + i] = 0x30 + i as u8;
+            data[44 + i] = 0x40 + i as u8;
+        }
+
+        let (block, consumed) = SbfBlock::parse(&data).unwrap();
+        assert_eq!(consumed, total_len as usize);
+        match block {
+            SbfBlock::GalAuthStatus(a) => {
+                assert_eq!(a.tow_ms(), 2_000);
+                assert_eq!(a.wnc(), 201);
+                assert_eq!(a.osnma_status, 0xABCD);
+                assert!((a.trusted_time_delta - 1.5).abs() < 1e-6);
+            }
+            other => panic!("expected GalAuthStatus, got {:?}", other),
         }
     }
 
