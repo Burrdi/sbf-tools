@@ -1,6 +1,7 @@
 # SBF Tools
 
-[![Version](https://img.shields.io/badge/version-0.1.1-blue)](Cargo.toml)
+[![crates.io](https://img.shields.io/crates/v/sbf-tools.svg)](https://crates.io/crates/sbf-tools)
+[![docs.rs](https://docs.rs/sbf-tools/badge.svg)](https://docs.rs/sbf-tools)
 
 Rust parser for Septentrio Binary Format.
 
@@ -16,6 +17,9 @@ pretending otherwise.
 - Includes a stateful `Meas3Decoder` built from Septentrio's `sbf2asc` sources in RxTools.
 - Keeps unknown block payloads as raw bytes.
 - Parse-only. This crate does not write SBF.
+- `SbfBlock` is `#[non_exhaustive]`: new block variants may appear in any minor release. If you
+  `match` on `SbfBlock` outside this crate, include a wildcard arm so your code keeps compiling
+  as support expands.
 
 The `serde` feature currently adds derives for the shared value types in `types.rs`. It does not
 cover every block struct yet.
@@ -26,14 +30,14 @@ The Cargo package is `sbf-tools`, and the Rust crate name is `sbf_tools`:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.1.1" }
+sbf_tools = { package = "sbf-tools", version = "0.2.0" }
 ```
 
 With the optional `serde` feature:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.1.1", features = ["serde"] }
+sbf_tools = { package = "sbf-tools", version = "0.2.0", features = ["serde"] }
 ```
 
 ## Quick start
@@ -229,6 +233,7 @@ the public Septentrio reference guide does not publish the internal layout.
 | 4030 | `GALIon` | Galileo ionosphere |
 | 4031 | `GALUtc` | Galileo UTC parameters |
 | 4032 | `GALGstGps` | Galileo GST-GPS relationship |
+| 4245 | `GALAuthStatus` | Galileo OSNMA authentication status |
 | 4034 | `GALSARRLM` | Galileo SAR return-link message |
 | 4022 | `GALRawFNAV` | Raw Galileo F/NAV |
 | 4023 | `GALRawINAV` | Raw Galileo I/NAV |
@@ -246,6 +251,7 @@ the public Septentrio reference guide does not publish the internal layout.
 | 4253 | `BDSCNav3` | BeiDou B-CNAV3 |
 | 4218 | `BDSRawB1C` | Raw BeiDou B1C |
 | 4219 | `BDSRawB2a` | Raw BeiDou B2a |
+| 4242 | `BDSRawB2b` | Raw BeiDou B2b |
 | 4047 | `CMPRaw` | Raw BeiDou nav bits |
 | 4095 | `QZSNav` | QZSS ephemeris |
 | 4116 | `QZSAlm` | QZSS almanac |
