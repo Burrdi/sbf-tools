@@ -9,6 +9,9 @@ pub(super) const F64_DNU: f64 = -2e10;
 /// Do-not-use value for `u16` fields.
 pub(super) const U16_DNU: u16 = 65535;
 
+/// Do-not-use value for `u8` fields.
+pub(super) const U8_DNU: u8 = 255;
+
 /// Do-not-use value for `i16` fields.
 pub(super) const I16_DNU: i16 = -32768;
 
@@ -36,6 +39,14 @@ pub(super) fn f64_or_none(value: f64) -> Option<f64> {
 
 pub(super) fn u16_or_none(value: u16) -> Option<u16> {
     if value == U16_DNU {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+pub(super) fn u8_or_none(value: u8) -> Option<u8> {
+    if value == U8_DNU {
         None
     } else {
         Some(value)

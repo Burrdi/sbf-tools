@@ -4,8 +4,8 @@
 
 mod attitude;
 pub mod catalog;
-mod dnu;
 mod differential;
+mod dnu;
 mod extended;
 mod external;
 mod ins;
@@ -809,7 +809,9 @@ impl SbfBlock {
                 SbfBlock::NtripServerStatus(NtripServerStatusBlock::parse(&header, block_data)?)
             }
             block_ids::RF_STATUS => SbfBlock::RfStatus(RfStatusBlock::parse(&header, block_data)?),
-            block_ids::RTCM_DATUM => SbfBlock::RtcmDatum(RtcmDatumBlock::parse(&header, block_data)?),
+            block_ids::RTCM_DATUM => {
+                SbfBlock::RtcmDatum(RtcmDatumBlock::parse(&header, block_data)?)
+            }
             block_ids::LBAND_BEAMS => {
                 SbfBlock::LBandBeams(LBandBeamsBlock::parse(&header, block_data)?)
             }
@@ -828,9 +830,9 @@ impl SbfBlock {
             block_ids::RX_MESSAGE => {
                 SbfBlock::RxMessage(RxMessageBlock::parse(&header, block_data)?)
             }
-            block_ids::ENCAPSULATED_OUTPUT => SbfBlock::EncapsulatedOutput(
-                EncapsulatedOutputBlock::parse(&header, block_data)?,
-            ),
+            block_ids::ENCAPSULATED_OUTPUT => {
+                SbfBlock::EncapsulatedOutput(EncapsulatedOutputBlock::parse(&header, block_data)?)
+            }
             block_ids::GIS_ACTION => {
                 SbfBlock::GisAction(GisActionBlock::parse(&header, block_data)?)
             }

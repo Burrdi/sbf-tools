@@ -5,6 +5,7 @@ use crate::header::SbfHeader;
 use crate::types::{SatelliteId, SignalType};
 
 use super::block_ids;
+use super::dnu::{u16_or_none, u8_or_none, I32_DNU, U16_DNU};
 use super::SbfBlockParse;
 
 // ============================================================================
@@ -43,8 +44,12 @@ pub struct SatelliteMeasurement {
     cn0_raw: u8,
     /// Raw Doppler value (multiply by 0.0001 for Hz)
     doppler_raw: i32,
+    /// Whether `doppler_raw` is available as an absolute Doppler value.
+    doppler_valid: bool,
     /// Raw lock time
     lock_time_raw: u16,
+    /// Whether `lock_time_raw` is available.
+    lock_time_valid: bool,
     /// Observation info flags
     pub obs_info: u8,
 }
@@ -52,11 +57,17 @@ pub struct SatelliteMeasurement {
 impl SatelliteMeasurement {
     /// Get CN0 in dB-Hz (scaled per SBF Reference Guide)
     pub fn cn0_dbhz(&self) -> f64 {
-        let base = self.cn0_raw as f64 * 0.25;
+        self.cn0_dbhz_opt().unwrap_or(0.0)
+    }
+
+    /// Get CN0 in dB-Hz, or `None` when the raw C/N0 field is unavailable.
+    pub fn cn0_dbhz_opt(&self) -> Option<f64> {
+        let cn0_raw = u8_or_none(self.cn0_raw)?;
+        let base = cn0_raw as f64 * 0.25;
         match self.signal_type {
             // Signal numbers 1 and 2 (GPS L1P, GPS L2P) have no +10 dB offset
-            SignalType::L1PY | SignalType::L2P => base,
-            _ => base + 10.0,
+            SignalType::L1PY | SignalType::L2P => Some(base),
+            _ => Some(base + 10.0),
         }
     }
 
@@ -67,12 +78,24 @@ impl SatelliteMeasurement {
 
     /// Check if CN0 is valid (not 255)
     pub fn cn0_valid(&self) -> bool {
-        self.cn0_raw != 255
+        u8_or_none(self.cn0_raw).is_some()
     }
 
-    /// Get Doppler in Hz (scaled)
+    /// Get Doppler in Hz (scaled).
+    ///
+    /// Returns `0.0` when the absolute Doppler field is unavailable. Use
+    /// [`Self::doppler_hz_opt`] to distinguish unavailable from a real zero.
     pub fn doppler_hz(&self) -> f64 {
-        self.doppler_raw as f64 * 0.0001
+        self.doppler_hz_opt().unwrap_or(0.0)
+    }
+
+    /// Get Doppler in Hz (scaled), or `None` when unavailable.
+    pub fn doppler_hz_opt(&self) -> Option<f64> {
+        if self.doppler_valid {
+            Some(self.doppler_raw as f64 * 0.0001)
+        } else {
+            None
+        }
     }
 
     /// Get raw Doppler value
@@ -80,11 +103,21 @@ impl SatelliteMeasurement {
         self.doppler_raw
     }
 
-    /// Get lock time in seconds
+    /// Get lock time in seconds.
     ///
-    /// Lock time is encoded in seconds and clipped at 65534 seconds.
+    /// Returns `0.0` when the lock time field is unavailable. Use
+    /// [`Self::lock_time_seconds_opt`] to distinguish unavailable from a real zero.
     pub fn lock_time_seconds(&self) -> f64 {
-        self.lock_time_raw as f64
+        self.lock_time_seconds_opt().unwrap_or(0.0)
+    }
+
+    /// Get lock time in seconds, or `None` when unavailable.
+    pub fn lock_time_seconds_opt(&self) -> Option<f64> {
+        if self.lock_time_valid {
+            Some(self.lock_time_raw as f64)
+        } else {
+            None
+        }
     }
 
     /// Get raw lock time value
@@ -241,15 +274,16 @@ impl SbfBlockParse for MeasEpochBlock {
             let svid = data[offset + 2];
             let type_field = data[offset + 1];
 
-            let doppler = if sb1_length_usize > 11 {
-                i32::from_le_bytes([
+            let (doppler, doppler_valid) = if sb1_length_usize > 11 {
+                let raw = i32::from_le_bytes([
                     data[offset + 8],
                     data[offset + 9],
                     data[offset + 10],
                     data[offset + 11],
-                ])
+                ]);
+                (raw, raw != I32_DNU)
             } else {
-                0
+                (0, false)
             };
 
             let cn0_raw = if sb1_length_usize > 15 {
@@ -258,10 +292,11 @@ impl SbfBlockParse for MeasEpochBlock {
                 255
             };
 
-            let lock_time = if sb1_length_usize > 17 {
-                u16::from_le_bytes([data[offset + 16], data[offset + 17]])
+            let (lock_time, lock_time_valid) = if sb1_length_usize > 17 {
+                let raw = u16::from_le_bytes([data[offset + 16], data[offset + 17]]);
+                (raw, raw != U16_DNU)
             } else {
-                0
+                (0, false)
             };
 
             let obs_info = if sb1_length_usize > 18 {
@@ -286,7 +321,9 @@ impl SbfBlockParse for MeasEpochBlock {
                     signal_type,
                     cn0_raw,
                     doppler_raw: doppler,
+                    doppler_valid,
                     lock_time_raw: lock_time,
+                    lock_time_valid,
                     obs_info,
                 });
 
@@ -312,10 +349,11 @@ impl SbfBlockParse for MeasEpochBlock {
                         } else {
                             255
                         };
-                        let lock_time_2 = if sb2_length_usize > 1 {
-                            data[offset + 1] as u16
+                        let (lock_time_2, lock_time_valid_2) = if sb2_length_usize > 1 {
+                            let raw = data[offset + 1];
+                            (raw as u16, u8_or_none(raw).is_some())
                         } else {
-                            0
+                            (0, false)
                         };
                         let obs_info_2 = if sb2_length_usize > 5 {
                             data[offset + 5]
@@ -331,7 +369,9 @@ impl SbfBlockParse for MeasEpochBlock {
                             signal_type: signal_type_2,
                             cn0_raw: cn0_raw_2,
                             doppler_raw: 0, // Type2 has offset, not absolute
+                            doppler_valid: false,
                             lock_time_raw: lock_time_2,
+                            lock_time_valid: lock_time_valid_2,
                             obs_info: obs_info_2,
                         });
 
@@ -439,17 +479,42 @@ impl MeasExtraChannel {
 
     /// Code variance in m^2
     pub fn code_var_m2(&self) -> f64 {
-        self.code_var_raw as f64 * 0.0001
+        self.code_var_m2_opt().unwrap_or(0.0)
+    }
+
+    /// Code variance in m^2, or `None` when unavailable.
+    pub fn code_var_m2_opt(&self) -> Option<f64> {
+        u16_or_none(self.code_var_raw).map(|raw| raw as f64 * 0.0001)
+    }
+
+    /// Raw code variance field from the SBF block.
+    pub fn code_var_raw(&self) -> u16 {
+        self.code_var_raw
     }
 
     /// Carrier variance in cycles^2
     pub fn carrier_var_cycles2(&self) -> f64 {
-        self.carrier_var_raw as f64 * 0.000001
+        self.carrier_var_cycles2_opt().unwrap_or(0.0)
+    }
+
+    /// Carrier variance in cycles^2, or `None` when unavailable.
+    pub fn carrier_var_cycles2_opt(&self) -> Option<f64> {
+        u16_or_none(self.carrier_var_raw).map(|raw| raw as f64 * 0.000001)
+    }
+
+    /// Raw carrier variance field from the SBF block.
+    pub fn carrier_var_raw(&self) -> u16 {
+        self.carrier_var_raw
     }
 
     /// Lock time in seconds
     pub fn lock_time_seconds(&self) -> f64 {
-        self.lock_time_raw as f64
+        self.lock_time_seconds_opt().unwrap_or(0.0)
+    }
+
+    /// Lock time in seconds, or `None` when unavailable.
+    pub fn lock_time_seconds_opt(&self) -> Option<f64> {
+        u16_or_none(self.lock_time_raw).map(|raw| raw as f64)
     }
 
     /// Raw lock time value
@@ -767,12 +832,17 @@ mod tests {
             signal_type: SignalType::L1CA,
             cn0_raw: 160, // 160 * 0.25 + 10 = 50 dB-Hz
             doppler_raw: 1000,
+            doppler_valid: true,
             lock_time_raw: 10,
+            lock_time_valid: true,
             obs_info: 0,
         };
 
         assert_eq!(meas.cn0_dbhz(), 50.0);
+        assert_eq!(meas.cn0_dbhz_opt(), Some(50.0));
         assert!(meas.cn0_valid());
+        assert_eq!(meas.doppler_hz_opt(), Some(0.1));
+        assert_eq!(meas.lock_time_seconds_opt(), Some(10.0));
     }
 
     #[test]
@@ -782,7 +852,9 @@ mod tests {
             signal_type: SignalType::L1PY, // GPS L1P (signal number 1)
             cn0_raw: 160,                  // 160 * 0.25 = 40 dB-Hz (no +10 dB)
             doppler_raw: 1000,
+            doppler_valid: true,
             lock_time_raw: 10,
+            lock_time_valid: true,
             obs_info: 0,
         };
 
@@ -796,11 +868,15 @@ mod tests {
             signal_type: SignalType::L1CA,
             cn0_raw: 255,
             doppler_raw: 0,
+            doppler_valid: false,
             lock_time_raw: 0,
+            lock_time_valid: false,
             obs_info: 0,
         };
 
         assert!(!meas.cn0_valid());
+        assert_eq!(meas.cn0_dbhz_opt(), None);
+        assert_eq!(meas.cn0_dbhz(), 0.0);
     }
 
     #[test]
@@ -811,10 +887,13 @@ mod tests {
             signal_type: SignalType::L1CA,
             cn0_raw: 160,
             doppler_raw: 0,
+            doppler_valid: true,
             lock_time_raw: 30,
+            lock_time_valid: true,
             obs_info: 0,
         };
         assert_eq!(meas.lock_time_seconds(), 30.0);
+        assert_eq!(meas.lock_time_seconds_opt(), Some(30.0));
 
         // Larger values are still linear, just clipped by the receiver if too large
         let meas2 = SatelliteMeasurement {
@@ -822,6 +901,27 @@ mod tests {
             ..meas
         };
         assert_eq!(meas2.lock_time_seconds(), 96.0);
+    }
+
+    #[test]
+    fn test_satellite_measurement_doppler_and_lock_time_dnu() {
+        let meas = SatelliteMeasurement {
+            sat_id: SatelliteId::new(Constellation::GPS, 1),
+            signal_type: SignalType::L1CA,
+            cn0_raw: 160,
+            doppler_raw: I32_DNU,
+            doppler_valid: false,
+            lock_time_raw: U16_DNU,
+            lock_time_valid: false,
+            obs_info: 0,
+        };
+
+        assert_eq!(meas.doppler_raw(), I32_DNU);
+        assert_eq!(meas.doppler_hz_opt(), None);
+        assert_eq!(meas.doppler_hz(), 0.0);
+        assert_eq!(meas.lock_time_raw(), U16_DNU);
+        assert_eq!(meas.lock_time_seconds_opt(), None);
+        assert_eq!(meas.lock_time_seconds(), 0.0);
     }
 
     #[test]
@@ -845,13 +945,46 @@ mod tests {
         assert!((channel.mp_correction_m() - 1.234).abs() < 1e-6);
         assert!((channel.smoothing_correction_m() + 0.5).abs() < 1e-6);
         assert!((channel.code_var_m2() - 0.02).abs() < 1e-6);
+        assert!((channel.code_var_m2_opt().unwrap() - 0.02).abs() < 1e-6);
+        assert_eq!(channel.code_var_raw(), 200);
         assert!((channel.carrier_var_cycles2() - 0.00015).abs() < 1e-9);
+        assert!((channel.carrier_var_cycles2_opt().unwrap() - 0.00015).abs() < 1e-9);
+        assert_eq!(channel.carrier_var_raw(), 150);
+        assert_eq!(channel.lock_time_seconds_opt(), Some(45.0));
         assert_eq!(channel.lock_time_raw(), 45);
         assert_eq!(channel.signal_type_raw(), 0);
         assert_eq!(channel.signal_number(), 0);
         assert_eq!(channel.antenna_id(), 0);
         assert_eq!(channel.car_mp_correction_raw(), None);
         assert_eq!(channel.misc_raw(), None);
+    }
+
+    #[test]
+    fn test_meas_extra_channel_dnu_handling() {
+        let channel = MeasExtraChannel {
+            rx_channel: 3,
+            signal_type: SignalType::L1CA,
+            signal_type_raw: 0,
+            signal_number: 0,
+            mp_correction_raw: 0,
+            smoothing_correction_raw: 0,
+            code_var_raw: U16_DNU,
+            carrier_var_raw: U16_DNU,
+            lock_time_raw: U16_DNU,
+            cum_loss_cont: 0,
+            car_mp_correction_raw: None,
+            info: 0,
+            misc_raw: None,
+        };
+
+        assert_eq!(channel.code_var_raw(), U16_DNU);
+        assert_eq!(channel.code_var_m2_opt(), None);
+        assert_eq!(channel.code_var_m2(), 0.0);
+        assert_eq!(channel.carrier_var_raw(), U16_DNU);
+        assert_eq!(channel.carrier_var_cycles2_opt(), None);
+        assert_eq!(channel.carrier_var_cycles2(), 0.0);
+        assert_eq!(channel.lock_time_seconds_opt(), None);
+        assert_eq!(channel.lock_time_seconds(), 0.0);
     }
 
     #[test]

@@ -5,12 +5,22 @@ use crate::header::SbfHeader;
 use crate::types::{PvtError, PvtMode};
 
 use super::block_ids;
-use super::dnu::{F32_DNU, F64_DNU, I16_DNU, U16_DNU};
+use super::dnu::{u16_or_none, u8_or_none, F32_DNU, F64_DNU, I16_DNU, U16_DNU};
 use super::SbfBlockParse;
 
 // ============================================================================
 // Constants
 // ============================================================================
+
+fn num_satellites_or_zero(nr_sv: u8) -> u8 {
+    u8_or_none(nr_sv).unwrap_or(0)
+}
+
+fn dop_or_none(raw: u16) -> Option<f32> {
+    u16_or_none(raw)
+        .filter(|&raw| raw != 0)
+        .map(|raw| raw as f32 * 0.01)
+}
 
 // ============================================================================
 // PVTGeodetic Block
@@ -192,7 +202,19 @@ impl PvtGeodeticBlock {
     }
 
     // Satellite count
+    /// Number of satellites used in the PVT computation.
+    ///
+    /// Returns `0` when the SBF `NrSV` field is not available (`255`). Use
+    /// [`Self::num_satellites_opt`] to distinguish unavailable from a real zero.
     pub fn num_satellites(&self) -> u8 {
+        num_satellites_or_zero(self.nr_sv)
+    }
+    /// Number of satellites used in the PVT computation, or `None` when unavailable.
+    pub fn num_satellites_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    /// Raw `NrSV` field from the SBF block.
+    pub fn num_satellites_raw(&self) -> u8 {
         self.nr_sv
     }
 
@@ -434,7 +456,19 @@ impl PvtCartesianBlock {
         }
     }
 
+    /// Number of satellites used in the PVT computation.
+    ///
+    /// Returns `0` when the SBF `NrSV` field is not available (`255`). Use
+    /// [`Self::num_satellites_opt`] to distinguish unavailable from a real zero.
     pub fn num_satellites(&self) -> u8 {
+        num_satellites_or_zero(self.nr_sv)
+    }
+    /// Number of satellites used in the PVT computation, or `None` when unavailable.
+    pub fn num_satellites_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    /// Raw `NrSV` field from the SBF block.
+    pub fn num_satellites_raw(&self) -> u8 {
         self.nr_sv
     }
 }
@@ -536,28 +570,69 @@ impl DopBlock {
     pub fn wnc(&self) -> u16 {
         self.wnc
     }
+    /// Number of satellites used in the DOP computation.
+    ///
+    /// Returns `0` when DOP information is unavailable. Use
+    /// [`Self::num_satellites_opt`] to distinguish unavailable from a real zero.
     pub fn num_satellites(&self) -> u8 {
+        if self.nr_sv == 0 {
+            0
+        } else {
+            num_satellites_or_zero(self.nr_sv)
+        }
+    }
+    /// Number of satellites used in the DOP computation, or `None` when unavailable.
+    pub fn num_satellites_opt(&self) -> Option<u8> {
+        if self.nr_sv == 0 {
+            None
+        } else {
+            u8_or_none(self.nr_sv)
+        }
+    }
+    /// Raw `NrSV` field from the SBF block.
+    pub fn num_satellites_raw(&self) -> u8 {
         self.nr_sv
     }
 
-    // Scaled DOP values (multiply by 0.01)
+    // Scaled DOP values (multiply by 0.01). Unavailable values return 0.0;
+    // use the *_opt accessors to distinguish unavailable from an actual zero.
     pub fn pdop(&self) -> f32 {
-        self.pdop_raw as f32 * 0.01
+        self.pdop_opt().unwrap_or(0.0)
     }
     pub fn tdop(&self) -> f32 {
-        self.tdop_raw as f32 * 0.01
+        self.tdop_opt().unwrap_or(0.0)
     }
     pub fn hdop(&self) -> f32 {
-        self.hdop_raw as f32 * 0.01
+        self.hdop_opt().unwrap_or(0.0)
     }
     pub fn vdop(&self) -> f32 {
-        self.vdop_raw as f32 * 0.01
+        self.vdop_opt().unwrap_or(0.0)
+    }
+    /// PDOP, or `None` when unavailable.
+    pub fn pdop_opt(&self) -> Option<f32> {
+        dop_or_none(self.pdop_raw)
+    }
+    /// TDOP, or `None` when unavailable.
+    pub fn tdop_opt(&self) -> Option<f32> {
+        dop_or_none(self.tdop_raw)
+    }
+    /// HDOP, or `None` when unavailable.
+    pub fn hdop_opt(&self) -> Option<f32> {
+        dop_or_none(self.hdop_raw)
+    }
+    /// VDOP, or `None` when unavailable.
+    pub fn vdop_opt(&self) -> Option<f32> {
+        dop_or_none(self.vdop_raw)
     }
     /// GDOP computed as sqrt(PDOP^2 + TDOP^2)
     pub fn gdop(&self) -> f32 {
-        let pdop = self.pdop();
-        let tdop = self.tdop();
-        (pdop * pdop + tdop * tdop).sqrt()
+        self.gdop_opt().unwrap_or(0.0)
+    }
+    /// GDOP computed as sqrt(PDOP^2 + TDOP^2), or `None` when either input is unavailable.
+    pub fn gdop_opt(&self) -> Option<f32> {
+        let pdop = self.pdop_opt()?;
+        let tdop = self.tdop_opt()?;
+        Some((pdop * pdop + tdop * tdop).sqrt())
     }
 
     // Raw DOP values
@@ -761,25 +836,13 @@ impl PosCartBlock {
     }
 
     pub fn pdop(&self) -> Option<f32> {
-        if self.pdop_raw == 0 {
-            None
-        } else {
-            Some(self.pdop_raw as f32 * 0.01)
-        }
+        dop_or_none(self.pdop_raw)
     }
     pub fn hdop(&self) -> Option<f32> {
-        if self.hdop_raw == 0 {
-            None
-        } else {
-            Some(self.hdop_raw as f32 * 0.01)
-        }
+        dop_or_none(self.hdop_raw)
     }
     pub fn vdop(&self) -> Option<f32> {
-        if self.vdop_raw == 0 {
-            None
-        } else {
-            Some(self.vdop_raw as f32 * 0.01)
-        }
+        dop_or_none(self.vdop_raw)
     }
 
     pub fn pdop_raw(&self) -> u16 {
@@ -792,7 +855,19 @@ impl PosCartBlock {
         self.vdop_raw
     }
 
+    /// Number of satellites used in the PVT computation.
+    ///
+    /// Returns `0` when the SBF `NrSV` field is not available (`255`). Use
+    /// [`Self::num_satellites_opt`] to distinguish unavailable from a real zero.
     pub fn num_satellites(&self) -> u8 {
+        num_satellites_or_zero(self.nr_sv)
+    }
+    /// Number of satellites used in the PVT computation, or `None` when unavailable.
+    pub fn num_satellites_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    /// Raw `NrSV` field from the SBF block.
+    pub fn num_satellites_raw(&self) -> u8 {
         self.nr_sv
     }
 
@@ -2635,6 +2710,25 @@ mod tests {
     }
 
     #[test]
+    fn test_pvt_nr_sv_dnu_handling() {
+        let mut geodetic_data = vec![0u8; 83];
+        geodetic_data[72] = 255;
+        let header = header_for(block_ids::PVT_GEODETIC, geodetic_data.len(), 1000, 2200);
+        let geodetic = PvtGeodeticBlock::parse(&header, &geodetic_data).unwrap();
+        assert_eq!(geodetic.num_satellites_raw(), 255);
+        assert_eq!(geodetic.num_satellites_opt(), None);
+        assert_eq!(geodetic.num_satellites(), 0);
+
+        let mut cartesian_data = vec![0u8; 83];
+        cartesian_data[72] = 255;
+        let header = header_for(block_ids::PVT_CARTESIAN, cartesian_data.len(), 1000, 2200);
+        let cartesian = PvtCartesianBlock::parse(&header, &cartesian_data).unwrap();
+        assert_eq!(cartesian.num_satellites_raw(), 255);
+        assert_eq!(cartesian.num_satellites_opt(), None);
+        assert_eq!(cartesian.num_satellites(), 0);
+    }
+
+    #[test]
     fn test_pvt_sat_cartesian_accessors() {
         let sat = PvtSatCartesianSatPos {
             svid: 12,
@@ -2912,6 +3006,54 @@ mod tests {
         assert!((dop.pdop() - 1.50).abs() < 0.001);
         assert!((dop.hdop() - 1.20).abs() < 0.001);
         assert!((dop.gdop() - (1.50_f32.powi(2) + 1.0_f32.powi(2)).sqrt()).abs() < 0.001);
+        assert_eq!(dop.pdop_opt(), Some(1.50));
+        assert_eq!(dop.tdop_opt(), Some(1.00));
+        assert_eq!(dop.num_satellites_opt(), Some(10));
+    }
+
+    #[test]
+    fn test_dop_dnu_handling() {
+        let mut data = vec![0u8; 30];
+        data[12] = 0; // NrSV is 0 when DOP information is unavailable.
+        data[14..16].copy_from_slice(&0_u16.to_le_bytes());
+        data[16..18].copy_from_slice(&0_u16.to_le_bytes());
+        data[18..20].copy_from_slice(&0_u16.to_le_bytes());
+        data[20..22].copy_from_slice(&0_u16.to_le_bytes());
+
+        let header = header_for(block_ids::DOP, data.len(), 1000, 2200);
+        let dop = DopBlock::parse(&header, &data).unwrap();
+        assert_eq!(dop.num_satellites_raw(), 0);
+        assert_eq!(dop.num_satellites_opt(), None);
+        assert_eq!(dop.num_satellites(), 0);
+        assert_eq!(dop.pdop_raw(), 0);
+        assert_eq!(dop.pdop_opt(), None);
+        assert_eq!(dop.tdop_opt(), None);
+        assert_eq!(dop.hdop_opt(), None);
+        assert_eq!(dop.vdop_opt(), None);
+        assert_eq!(dop.gdop_opt(), None);
+        assert_eq!(dop.pdop(), 0.0);
+        assert_eq!(dop.gdop(), 0.0);
+    }
+
+    #[test]
+    fn test_dop_generic_u16_dnu_does_not_scale_to_655_35() {
+        let mut data = vec![0u8; 30];
+        data[12] = 255;
+        data[14..16].copy_from_slice(&U16_DNU.to_le_bytes());
+        data[16..18].copy_from_slice(&U16_DNU.to_le_bytes());
+        data[18..20].copy_from_slice(&U16_DNU.to_le_bytes());
+        data[20..22].copy_from_slice(&U16_DNU.to_le_bytes());
+
+        let header = header_for(block_ids::DOP, data.len(), 1000, 2200);
+        let dop = DopBlock::parse(&header, &data).unwrap();
+        assert_eq!(dop.num_satellites_raw(), 255);
+        assert_eq!(dop.num_satellites_opt(), None);
+        assert_eq!(dop.num_satellites(), 0);
+        assert_eq!(dop.pdop_raw(), U16_DNU);
+        assert_eq!(dop.pdop_opt(), None);
+        assert_eq!(dop.pdop(), 0.0);
+        assert_ne!(dop.pdop(), 655.35);
+        assert_eq!(dop.gdop_opt(), None);
     }
 
     #[test]
@@ -3185,12 +3327,12 @@ mod tests {
             cov_xz: 0.0,
             cov_yz: 0.0,
             pdop_raw: 0,
-            hdop_raw: 100,
+            hdop_raw: U16_DNU,
             vdop_raw: 0,
             misc: 0,
             alert_flag: 0,
             datum: 0,
-            nr_sv: 0,
+            nr_sv: 255,
             wa_corr_info: 0,
             reference_id: 0,
             mean_corr_age_raw: U16_DNU,
@@ -3200,7 +3342,12 @@ mod tests {
         assert!(block.x_m().is_none());
         assert!(block.x_std_m().is_none());
         assert!(block.y_std_m().is_none());
+        assert!(block.pdop().is_none());
+        assert!(block.hdop().is_none());
         assert!(block.vdop().is_none());
+        assert_eq!(block.num_satellites_raw(), 255);
+        assert_eq!(block.num_satellites_opt(), None);
+        assert_eq!(block.num_satellites(), 0);
         assert!(block.mean_corr_age_seconds().is_none());
     }
 

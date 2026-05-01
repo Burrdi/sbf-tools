@@ -30,14 +30,14 @@ The Cargo package is `sbf-tools`, and the Rust crate name is `sbf_tools`:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.2.1" }
+sbf_tools = { package = "sbf-tools", version = "0.3.0" }
 ```
 
 With the optional `serde` feature:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.2.1", features = ["serde"] }
+sbf_tools = { package = "sbf-tools", version = "0.3.0", features = ["serde"] }
 ```
 
 ## Quick start
@@ -355,7 +355,18 @@ Some practical points:
   `ReceiverStatus`, `DynDNSStatus`, and `DiskStatus` expose revision-specific fields when the
   data is present.
 - When the receiver uses a documented do-not-use value, accessors return `None` instead of the raw
-  sentinel where that makes sense.
+  sentinel where that makes sense. For `NrSV`, `255` means unavailable; `num_satellites_opt()`
+  returns `None`, `num_satellites_raw()` returns the wire value, and `num_satellites()` returns `0`
+  for unavailable so it is safe for counts and UI display.
+- In `DopBlock`, the SBF `DOP` table uses `0` for unavailable `NrSV` and `PDOP`/`TDOP`/`HDOP`/`VDOP`.
+  Use `pdop_opt()`, `tdop_opt()`, `hdop_opt()`, `vdop_opt()`, and `gdop_opt()` when the unavailable
+  state matters. The numeric DOP helpers return `0.0` for unavailable values, while `*_raw()` returns
+  the wire value.
+- `MeasEpoch` and `MeasExtra` keep raw measurement fields available and add `*_opt()` helpers for
+  documented sentinels such as CN0 `255`, Doppler `-2147483648`, lock time DNU values, and tracking
+  variance `65535`.
+- `ChannelStatus` uses `azimuth_deg_opt()` and `elevation_deg_opt()` for unavailable azimuth `511`
+  and elevation `-128`; the numeric helpers return `0.0` for those unavailable fields.
 - Some blocks are public in name but not in field layout. `PVTSupportA` is kept as a named raw
   payload wrapper for that reason.
 - `block_name(id)` returns the main name table, and `fallback_name(id)` covers additional
@@ -371,15 +382,18 @@ use sbf_tools::DopBlock;
 
 fn example(dop: &DopBlock) {
     let pdop_raw: u16 = dop.pdop_raw();
-    let pdop: f32 = dop.pdop();
+    let pdop: Option<f32> = dop.pdop_opt();
 
-    println!("raw={pdop_raw}, scaled={pdop}");
+    println!("raw={pdop_raw}, scaled={pdop:?}");
 }
 ```
 
 A few common patterns in the API:
 
-- `DopBlock` exposes raw DOP integers and scaled floating-point values.
+- `DopBlock` exposes raw DOP integers, `Option` scaled values, and legacy numeric helpers that return
+  `0.0` when the corresponding raw value is unavailable.
+- Measurement and channel-status blocks follow the same pattern for documented unavailable numeric
+  fields: use `*_opt()` for validity-aware values and `*_raw()` where a raw accessor exists.
 - Visibility and base-vector blocks keep raw azimuth/elevation fields internally and expose degree
   accessors such as `azimuth_deg()` and `elevation_deg()`.
 - PVT, covariance, and attitude blocks expose unit-ready accessors like `latitude_deg()`,
@@ -394,7 +408,7 @@ The same conversions show up repeatedly across SBF blocks. The exact accessor na
 but these are the ones you will run into most often:
 
 - TOW: milliseconds in the wire format, seconds through `tow_seconds()`
-- DOP values: `raw * 0.01`
+- DOP values: `raw * 0.01`, except raw `0` means unavailable in the `DOP` and `PosCart` blocks
 - Azimuth and elevation in visibility/vector blocks: `raw * 0.01` degrees
 - Accuracy and correction age fields in many PVT-related blocks: `raw * 0.01`
 - `MeasEpoch` Doppler: `raw * 0.0001` Hz

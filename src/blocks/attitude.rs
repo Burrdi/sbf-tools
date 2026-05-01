@@ -4,7 +4,7 @@ use crate::error::{SbfError, SbfResult};
 use crate::header::SbfHeader;
 
 use super::block_ids;
-use super::dnu::{f32_or_none, f64_or_none, F32_DNU};
+use super::dnu::{f32_or_none, f64_or_none, u8_or_none, F32_DNU};
 use super::SbfBlockParse;
 
 #[cfg(test)]
@@ -44,7 +44,19 @@ impl AttEulerBlock {
         self.wnc
     }
 
+    /// Number of satellites included in attitude calculations.
+    ///
+    /// Returns `0` when the SBF `NrSV` field is not available (`255`). Use
+    /// [`Self::num_satellites_opt`] to distinguish unavailable from a real zero.
     pub fn num_satellites(&self) -> u8 {
+        u8_or_none(self.nr_sv).unwrap_or(0)
+    }
+    /// Number of satellites included in attitude calculations, or `None` when unavailable.
+    pub fn num_satellites_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    /// Raw `NrSV` field from the SBF block.
+    pub fn num_satellites_raw(&self) -> u8 {
         self.nr_sv
     }
     pub fn error_raw(&self) -> u8 {
@@ -446,7 +458,7 @@ mod tests {
         let block = AttEulerBlock {
             tow_ms: 0,
             wnc: 0,
-            nr_sv: 0,
+            nr_sv: 255,
             error: 0,
             mode: 0,
             datum: 0,
@@ -458,6 +470,9 @@ mod tests {
             heading_rate_dps: F32_DNU,
         };
 
+        assert_eq!(block.num_satellites_raw(), 255);
+        assert_eq!(block.num_satellites_opt(), None);
+        assert_eq!(block.num_satellites(), 0);
         assert!(block.heading_deg().is_none());
         assert!(block.pitch_deg().is_none());
         assert!(block.roll_deg().is_some());
@@ -483,6 +498,8 @@ mod tests {
         let block = AttEulerBlock::parse(&header, &data).unwrap();
 
         assert_eq!(block.num_satellites(), 8);
+        assert_eq!(block.num_satellites_opt(), Some(8));
+        assert_eq!(block.num_satellites_raw(), 8);
         assert_eq!(block.error_raw(), 1);
         assert_eq!(block.mode_raw(), 500);
         assert!((block.heading_deg().unwrap() - 10.5).abs() < 1e-6);

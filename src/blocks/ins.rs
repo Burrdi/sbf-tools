@@ -5,7 +5,7 @@ use crate::header::SbfHeader;
 use crate::types::{PvtError, PvtMode};
 
 use super::block_ids;
-use super::dnu::{F32_DNU, F64_DNU, I16_DNU, I32_DNU, U16_DNU};
+use super::dnu::{u8_or_none, F32_DNU, F64_DNU, I16_DNU, I32_DNU, U16_DNU};
 use super::SbfBlockParse;
 
 // ============================================================================
@@ -63,6 +63,12 @@ impl IntPvCartBlock {
         self.info
     }
     pub fn nr_sv(&self) -> u8 {
+        u8_or_none(self.nr_sv).unwrap_or(0)
+    }
+    pub fn nr_sv_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    pub fn nr_sv_raw(&self) -> u8 {
         self.nr_sv
     }
     pub fn nr_ant(&self) -> u8 {
@@ -241,6 +247,12 @@ impl IntPvGeodBlock {
         self.info
     }
     pub fn nr_sv(&self) -> u8 {
+        u8_or_none(self.nr_sv).unwrap_or(0)
+    }
+    pub fn nr_sv_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    pub fn nr_sv_raw(&self) -> u8 {
         self.nr_sv
     }
     pub fn nr_ant(&self) -> u8 {
@@ -661,6 +673,12 @@ impl IntAttEulerBlock {
         self.info
     }
     pub fn nr_sv(&self) -> u8 {
+        u8_or_none(self.nr_sv).unwrap_or(0)
+    }
+    pub fn nr_sv_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    pub fn nr_sv_raw(&self) -> u8 {
         self.nr_sv
     }
     pub fn nr_ant(&self) -> u8 {
@@ -1518,6 +1536,8 @@ mod tests {
         assert_eq!(block.tow_seconds(), 1.0);
         assert_eq!(block.wnc(), 2000);
         assert_eq!(block.nr_sv(), 12);
+        assert_eq!(block.nr_sv_opt(), Some(12));
+        assert_eq!(block.nr_sv_raw(), 12);
         assert_eq!(block.gnss_age_seconds(), Some(1.0));
     }
 
@@ -1526,12 +1546,16 @@ mod tests {
         let mut data = vec![0u8; 70];
         data[6..10].copy_from_slice(&1000u32.to_le_bytes());
         data[10..12].copy_from_slice(&2000u16.to_le_bytes());
+        data[16] = 255;
         data[20..22].copy_from_slice(&U16_DNU.to_le_bytes());
         data[22..30].copy_from_slice(&F64_DNU.to_le_bytes());
         data[46..50].copy_from_slice(&F32_DNU.to_le_bytes());
 
         let header = header_for(block_ids::INT_PV_CART, 1000, 2000);
         let block = IntPvCartBlock::parse(&header, &data).unwrap();
+        assert_eq!(block.nr_sv_raw(), 255);
+        assert_eq!(block.nr_sv_opt(), None);
+        assert_eq!(block.nr_sv(), 0);
         assert!(block.gnss_age_seconds().is_none());
         assert!(block.x_m().is_none());
         assert!(block.velocity_x_mps().is_none());
@@ -1565,6 +1589,8 @@ mod tests {
         assert_eq!(block.tow_seconds(), 2.0);
         assert_eq!(block.wnc(), 2100);
         assert_eq!(block.nr_sv(), 10);
+        assert_eq!(block.nr_sv_opt(), Some(10));
+        assert_eq!(block.nr_sv_raw(), 10);
         assert_eq!(block.gnss_age_seconds(), Some(0.5));
         assert!((block.latitude_deg().unwrap() - lat_rad.to_degrees()).abs() < 1e-6);
         assert!((block.longitude_deg().unwrap() - long_rad.to_degrees()).abs() < 1e-6);
@@ -1661,12 +1687,16 @@ mod tests {
         let mut data = vec![0u8; 70];
         data[6..10].copy_from_slice(&2000u32.to_le_bytes());
         data[10..12].copy_from_slice(&2100u16.to_le_bytes());
+        data[16] = 255;
         data[20..22].copy_from_slice(&U16_DNU.to_le_bytes());
         data[22..30].copy_from_slice(&F64_DNU.to_le_bytes());
         data[46..50].copy_from_slice(&F32_DNU.to_le_bytes());
 
         let header = header_for(block_ids::INT_PV_GEOD, 2000, 2100);
         let block = IntPvGeodBlock::parse(&header, &data).unwrap();
+        assert_eq!(block.nr_sv_raw(), 255);
+        assert_eq!(block.nr_sv_opt(), None);
+        assert_eq!(block.nr_sv(), 0);
         assert!(block.gnss_age_seconds().is_none());
         assert!(block.latitude_deg().is_none());
         assert!(block.velocity_north_mps().is_none());
@@ -1695,6 +1725,8 @@ mod tests {
         let block = IntAttEulerBlock::parse(&header, &data).unwrap();
         assert_eq!(block.tow_seconds(), 3.0);
         assert_eq!(block.nr_sv(), 8);
+        assert_eq!(block.nr_sv_opt(), Some(8));
+        assert_eq!(block.nr_sv_raw(), 8);
         assert_eq!(block.gnss_age_raw(), 25);
         assert_eq!(block.gnss_age_seconds(), Some(0.25));
         assert_eq!(block.heading_deg(), Some(180.0));
@@ -1708,11 +1740,15 @@ mod tests {
         let mut data = vec![0u8; 60];
         data[6..10].copy_from_slice(&3000u32.to_le_bytes());
         data[10..12].copy_from_slice(&2200u16.to_le_bytes());
+        data[16] = 255;
         data[19..21].copy_from_slice(&U16_DNU.to_le_bytes());
         data[21..25].copy_from_slice(&F32_DNU.to_le_bytes());
 
         let header = header_for(block_ids::INT_ATT_EULER, 3000, 2200);
         let block = IntAttEulerBlock::parse(&header, &data).unwrap();
+        assert_eq!(block.nr_sv_raw(), 255);
+        assert_eq!(block.nr_sv_opt(), None);
+        assert_eq!(block.nr_sv(), 0);
         assert_eq!(block.gnss_age_raw(), U16_DNU);
         assert!(block.gnss_age_seconds().is_none());
         assert!(block.heading_deg().is_none());

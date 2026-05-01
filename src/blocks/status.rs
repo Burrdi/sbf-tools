@@ -28,7 +28,8 @@ fn format_ip_bytes(bytes: &[u8; 16]) -> String {
     if bytes[0..12].iter().all(|&b| b == 0) {
         format!("{}.{}.{}.{}", bytes[12], bytes[13], bytes[14], bytes[15])
     } else {
-        bytes.chunks(2)
+        bytes
+            .chunks(2)
             .map(|c| format!("{:02x}{:02x}", c[0], c[1]))
             .collect::<Vec<_>>()
             .join(":")
@@ -261,14 +262,48 @@ pub struct ChannelSatInfo {
 }
 
 impl ChannelSatInfo {
-    /// Get azimuth in degrees
+    /// Get azimuth in degrees.
+    ///
+    /// Returns `0.0` when the azimuth is unavailable. Use [`Self::azimuth_deg_opt`]
+    /// to distinguish unavailable from a real north azimuth.
     pub fn azimuth_deg(&self) -> f64 {
-        self.azimuth_raw as f64
+        self.azimuth_deg_opt().unwrap_or(0.0)
     }
 
-    /// Get elevation in degrees
+    /// Get azimuth in degrees, or `None` when unavailable.
+    pub fn azimuth_deg_opt(&self) -> Option<f64> {
+        if self.azimuth_raw == 511 {
+            None
+        } else {
+            Some(self.azimuth_raw as f64)
+        }
+    }
+
+    /// Raw azimuth bits from the `Azimuth/RiseSet` field.
+    pub fn azimuth_raw(&self) -> u16 {
+        self.azimuth_raw
+    }
+
+    /// Get elevation in degrees.
+    ///
+    /// Returns `0.0` when the elevation is unavailable. Use [`Self::elevation_deg_opt`]
+    /// to distinguish unavailable from a real horizon elevation.
     pub fn elevation_deg(&self) -> f64 {
-        self.elevation_raw as f64
+        self.elevation_deg_opt().unwrap_or(0.0)
+    }
+
+    /// Get elevation in degrees, or `None` when unavailable.
+    pub fn elevation_deg_opt(&self) -> Option<f64> {
+        if self.elevation_raw == I8_DNU {
+            None
+        } else {
+            Some(self.elevation_raw as f64)
+        }
+    }
+
+    /// Raw elevation field from the SBF block.
+    pub fn elevation_raw(&self) -> i8 {
+        self.elevation_raw
     }
 
     /// Check if satellite is rising
@@ -2498,7 +2533,9 @@ impl SbfBlockParse for RxMessageBlock {
         let string_len = u16::from_le_bytes(data[18..20].try_into().unwrap()) as usize;
         let end = 22 + string_len;
         if end > data_len {
-            return Err(SbfError::ParseError("RxMessage length exceeds block".into()));
+            return Err(SbfError::ParseError(
+                "RxMessage length exceeds block".into(),
+            ));
         }
         Ok(Self {
             tow_ms: header.tow_ms,
@@ -2607,7 +2644,9 @@ impl SbfBlockParse for GisActionBlock {
         let comment_len = u16::from_le_bytes(data[12..14].try_into().unwrap()) as usize;
         let end = 26 + comment_len;
         if end > data_len {
-            return Err(SbfError::ParseError("GISAction comment exceeds block".into()));
+            return Err(SbfError::ParseError(
+                "GISAction comment exceeds block".into(),
+            ));
         }
         Ok(Self {
             tow_ms: header.tow_ms,
@@ -2731,6 +2770,27 @@ mod tests {
         assert!((info.elevation_deg().unwrap() - 45.0).abs() < 0.01);
         assert!(info.is_rising());
         assert!(info.is_above_horizon());
+    }
+
+    #[test]
+    fn test_channel_sat_info_dnu_handling() {
+        let info = ChannelSatInfo {
+            sat_id: SatelliteId::new(Constellation::GPS, 1),
+            freq_nr: 0,
+            azimuth_raw: 511,
+            rise_set: 3,
+            elevation_raw: I8_DNU,
+            health_status: 0,
+            states: Vec::new(),
+        };
+
+        assert_eq!(info.azimuth_raw(), 511);
+        assert_eq!(info.azimuth_deg_opt(), None);
+        assert_eq!(info.azimuth_deg(), 0.0);
+        assert_eq!(info.elevation_raw(), I8_DNU);
+        assert_eq!(info.elevation_deg_opt(), None);
+        assert_eq!(info.elevation_deg(), 0.0);
+        assert!(info.is_rise_set_unknown());
     }
 
     #[test]

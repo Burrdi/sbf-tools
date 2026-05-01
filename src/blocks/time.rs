@@ -4,9 +4,9 @@ use crate::error::{SbfError, SbfResult};
 use crate::header::SbfHeader;
 use crate::types::{PvtError, PvtMode};
 
-use super::position::BaseVectorGeodBlock;
 use super::block_ids;
-use super::dnu::{f32_or_none, f64_or_none, U16_DNU};
+use super::dnu::{f32_or_none, f64_or_none, u8_or_none, U16_DNU};
+use super::position::BaseVectorGeodBlock;
 use super::SbfBlockParse;
 
 #[cfg(test)]
@@ -401,7 +401,19 @@ impl ExtEventPvtCartesianBlock {
         self.mean_corr_age_raw
     }
 
+    /// Number of satellites used in the PVT computation.
+    ///
+    /// Returns `0` when the SBF `NrSV` field is not available (`255`). Use
+    /// [`Self::num_satellites_opt`] to distinguish unavailable from a real zero.
     pub fn num_satellites(&self) -> u8 {
+        u8_or_none(self.nr_sv).unwrap_or(0)
+    }
+    /// Number of satellites used in the PVT computation, or `None` when unavailable.
+    pub fn num_satellites_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    /// Raw `NrSV` field from the SBF block.
+    pub fn num_satellites_raw(&self) -> u8 {
         self.nr_sv
     }
 }
@@ -577,7 +589,19 @@ impl ExtEventPvtGeodeticBlock {
         self.mean_corr_age_raw
     }
 
+    /// Number of satellites used in the PVT computation.
+    ///
+    /// Returns `0` when the SBF `NrSV` field is not available (`255`). Use
+    /// [`Self::num_satellites_opt`] to distinguish unavailable from a real zero.
     pub fn num_satellites(&self) -> u8 {
+        u8_or_none(self.nr_sv).unwrap_or(0)
+    }
+    /// Number of satellites used in the PVT computation, or `None` when unavailable.
+    pub fn num_satellites_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    /// Raw `NrSV` field from the SBF block.
+    pub fn num_satellites_raw(&self) -> u8 {
         self.nr_sv
     }
 }
@@ -690,7 +714,19 @@ impl ExtEventAttEulerBlock {
     pub fn wnc(&self) -> u16 {
         self.wnc
     }
+    /// Number of satellites included in attitude calculations.
+    ///
+    /// Returns `0` when the SBF `NrSV` field is not available (`255`). Use
+    /// [`Self::num_satellites_opt`] to distinguish unavailable from a real zero.
     pub fn num_satellites(&self) -> u8 {
+        u8_or_none(self.nr_sv).unwrap_or(0)
+    }
+    /// Number of satellites included in attitude calculations, or `None` when unavailable.
+    pub fn num_satellites_opt(&self) -> Option<u8> {
+        u8_or_none(self.nr_sv)
+    }
+    /// Raw `NrSV` field from the SBF block.
+    pub fn num_satellites_raw(&self) -> u8 {
         self.nr_sv
     }
     pub fn error_raw(&self) -> u8 {
@@ -981,7 +1017,7 @@ mod tests {
             rx_clk_drift_ppm: 0.0,
             time_system: 0,
             datum: 0,
-            nr_sv: 0,
+            nr_sv: 255,
             wa_corr_info: 0,
             reference_id: 0,
             mean_corr_age_raw: U16_DNU,
@@ -992,6 +1028,9 @@ mod tests {
 
         assert!(block.x_m().is_none());
         assert!(block.undulation_m().is_none());
+        assert_eq!(block.num_satellites_raw(), 255);
+        assert_eq!(block.num_satellites_opt(), None);
+        assert_eq!(block.num_satellites(), 0);
         assert!(block.mean_corr_age_seconds().is_none());
     }
 
@@ -1027,6 +1066,8 @@ mod tests {
         assert_eq!(block.error_raw(), 1);
         assert_eq!(block.reference_id, 123);
         assert_eq!(block.num_satellites(), 7);
+        assert_eq!(block.num_satellites_opt(), Some(7));
+        assert_eq!(block.num_satellites_raw(), 7);
         assert!((block.x_m().unwrap() - 1.5).abs() < 1e-6);
         assert!((block.mean_corr_age_seconds().unwrap() - 2.0).abs() < 1e-6);
     }
@@ -1083,7 +1124,7 @@ mod tests {
             rx_clk_drift_ppm: 0.0,
             time_system: 0,
             datum: 0,
-            nr_sv: 0,
+            nr_sv: 255,
             wa_corr_info: 0,
             reference_id: 0,
             mean_corr_age_raw: U16_DNU,
@@ -1095,6 +1136,9 @@ mod tests {
         assert!(block.latitude_deg().is_none());
         assert!(block.height_m().is_none());
         assert!(block.undulation_m().is_none());
+        assert_eq!(block.num_satellites_raw(), 255);
+        assert_eq!(block.num_satellites_opt(), None);
+        assert_eq!(block.num_satellites(), 0);
         assert!(block.mean_corr_age_seconds().is_none());
     }
 
@@ -1129,6 +1173,8 @@ mod tests {
         assert_eq!(block.mode_raw(), 2);
         assert_eq!(block.reference_id, 321);
         assert_eq!(block.num_satellites(), 9);
+        assert_eq!(block.num_satellites_opt(), Some(9));
+        assert_eq!(block.num_satellites_raw(), 9);
         assert!((block.latitude_deg().unwrap() - 28.6479).abs() < 1e-3);
         assert!((block.height_m().unwrap() - 50.0).abs() < 1e-6);
     }
@@ -1176,11 +1222,27 @@ mod tests {
         let header = header_for(block_ids::EXT_EVENT_ATT_EULER, data.len(), 13000, 2500);
         let block = ExtEventAttEulerBlock::parse(&header, &data).unwrap();
         assert_eq!(block.num_satellites(), 8);
+        assert_eq!(block.num_satellites_opt(), Some(8));
+        assert_eq!(block.num_satellites_raw(), 8);
         assert_eq!(block.error_raw(), 1);
         assert_eq!(block.mode_raw(), 4);
         assert_eq!(block.heading_deg(), Some(45.0));
         assert_eq!(block.pitch_deg(), Some(-2.5));
         assert_eq!(block.roll_deg(), Some(1.25));
         assert_eq!(block.heading_rate_dps(), Some(-0.75));
+    }
+
+    #[test]
+    fn test_ext_event_att_euler_nr_sv_dnu() {
+        let mut data = vec![0u8; 42];
+        data[12] = 255;
+        data[18..22].copy_from_slice(&F32_DNU.to_le_bytes());
+
+        let header = header_for(block_ids::EXT_EVENT_ATT_EULER, data.len(), 13000, 2500);
+        let block = ExtEventAttEulerBlock::parse(&header, &data).unwrap();
+        assert_eq!(block.num_satellites_raw(), 255);
+        assert_eq!(block.num_satellites_opt(), None);
+        assert_eq!(block.num_satellites(), 0);
+        assert_eq!(block.heading_deg(), None);
     }
 }
