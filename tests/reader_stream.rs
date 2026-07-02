@@ -136,3 +136,85 @@ fn reader_reports_incomplete_final_block() {
     assert_eq!(needed, 8);
     assert!(have >= 2);
 }
+
+/// A `Read` that replays a scripted sequence of results, including transient
+/// `WouldBlock` errors, to emulate a non-blocking source.
+struct FlakyReader {
+    chunks: std::collections::VecDeque<io::Result<Vec<u8>>>,
+}
+
+impl FlakyReader {
+    fn new(chunks: Vec<io::Result<Vec<u8>>>) -> Self {
+        Self {
+            chunks: chunks.into_iter().collect(),
+        }
+    }
+}
+
+impl Read for FlakyReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.chunks.pop_front() {
+            Some(Ok(data)) => {
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                if n < data.len() {
+                    self.chunks.push_front(Ok(data[n..].to_vec()));
+                }
+                Ok(n)
+            }
+            Some(Err(e)) => Err(e),
+            None => Ok(0),
+        }
+    }
+}
+
+#[test]
+fn reader_signals_would_block_then_resumes() {
+    let block = build_block(
+        block_ids::RECEIVER_TIME,
+        0,
+        5_000,
+        TEST_WNC,
+        &[24, 3, 31, 23, 59, 58, 18u8, 4],
+    );
+    let mid = block.len() / 2;
+    let first = block[..mid].to_vec();
+    let second = block[mid..].to_vec();
+
+    let mut reader = FlakyReader::new(vec![
+        Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        Ok(first),
+        Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        Ok(second),
+    ])
+    .sbf_blocks();
+
+    // No data available yet -> WouldBlock, not end of stream.
+    assert!(matches!(reader.read_block(), Err(SbfError::WouldBlock)));
+    // Partial block buffered, then WouldBlock again mid-block.
+    assert!(matches!(reader.read_block(), Err(SbfError::WouldBlock)));
+    // Remaining bytes arrive -> the block completes.
+    let parsed = reader.read_block().unwrap().unwrap();
+    assert!(matches!(parsed, SbfBlock::ReceiverTime(_)));
+    // Source now returns Ok(0) -> genuine end of stream.
+    assert!(reader.read_block().unwrap().is_none());
+}
+
+#[test]
+fn reader_skips_bounded_garbage_with_no_sync() {
+    const GARBAGE: usize = 10_000;
+    // 0x00 bytes contain no 0x24 0x40 sync, so the reader must traverse the whole
+    // run via the no-sync branch without losing the following block.
+    let mut stream = vec![0u8; GARBAGE];
+    let block = build_block(block_ids::END_OF_MEAS, 0, 7_000, TEST_WNC, &[]);
+    stream.extend_from_slice(&block);
+
+    let mut reader = Cursor::new(stream).sbf_blocks();
+    let parsed = reader.read_block().unwrap().unwrap();
+    assert!(matches!(parsed, SbfBlock::EndOfMeas(_)));
+    assert!(reader.read_block().unwrap().is_none());
+
+    let stats = reader.stats();
+    assert_eq!(stats.blocks_parsed, 1);
+    assert_eq!(stats.bytes_skipped, GARBAGE as u64);
+}

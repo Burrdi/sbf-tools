@@ -30,14 +30,14 @@ The Cargo package is `sbf-tools`, and the Rust crate name is `sbf_tools`:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.3.0" }
+sbf_tools = { package = "sbf-tools", version = "0.4.0" }
 ```
 
 With the optional `serde` feature:
 
 ```toml
 [dependencies]
-sbf_tools = { package = "sbf-tools", version = "0.3.0", features = ["serde"] }
+sbf_tools = { package = "sbf-tools", version = "0.4.0", features = ["serde"] }
 ```
 
 ## Quick start
@@ -458,7 +458,10 @@ What those options mean in practice:
   working with large or bursty inputs.
 - `.validate_crc(false)` skips CRC checks. That can be useful for trusted files when you care more
   about throughput than corruption detection.
-- `read_block()` gives explicit control over `Ok(Some(block))`, `Ok(None)`, and parse errors.
+- `read_block()` gives explicit control over each outcome: `Ok(Some(block))` for a parsed block,
+  `Ok(None)` at end of stream, `Err(SbfError::WouldBlock)` when a non-blocking source has no data
+  yet (retry later; blocking sources report end of stream instead), `Err(SbfError::IncompleteBlock)`
+  for a truncated final block, and other parse errors otherwise.
 - The iterator interface is the simplest option for ordinary file and stream processing.
 
 ## Other details worth knowing

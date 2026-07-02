@@ -6,15 +6,24 @@ use std::collections::VecDeque;
 use std::io::Read;
 
 use crate::blocks::SbfBlock;
-use crate::crc::validate_block;
 use crate::error::{SbfError, SbfResult};
-use crate::header::{SbfHeader, SBF_SYNC};
+use crate::header::{SbfHeader, MIN_BLOCK_LENGTH, SBF_SYNC};
 
 /// Default buffer capacity (64KB)
 const DEFAULT_BUFFER_CAPACITY: usize = 65536;
 
 /// Maximum buffer size before trimming (128KB)
 const MAX_BUFFER_SIZE: usize = 131072;
+
+/// Outcome of a single attempt to pull more bytes from the source.
+enum Fill {
+    /// At least one byte was appended to the buffer.
+    Filled,
+    /// The source reported end of stream (`read` returned `Ok(0)`).
+    Eof,
+    /// A non-blocking source has no data available right now (`WouldBlock`).
+    WouldBlock,
+}
 
 /// SBF block reader
 ///
@@ -97,11 +106,18 @@ impl<R: Read> SbfReader<R> {
         self.stats = ReaderStats::default();
     }
 
-    /// Read the next SBF block
+    /// Read the next SBF block.
     ///
-    /// Returns `Ok(Some(block))` if a block was read successfully,
-    /// `Ok(None)` if end of stream was reached,
-    /// or `Err(e)` if an error occurred.
+    /// Returns:
+    /// - `Ok(Some(block))` - a block was parsed successfully.
+    /// - `Ok(None)` - end of stream: the source reported EOF and no partial
+    ///   block remains in the buffer.
+    /// - `Err(SbfError::WouldBlock)` - a non-blocking source has no data
+    ///   available yet; call again later. Blocking sources (files, `Cursor`)
+    ///   never return this and report EOF instead.
+    /// - `Err(SbfError::IncompleteBlock { .. })` - the stream ended in the
+    ///   middle of a block (a genuinely truncated final block).
+    /// - `Err(e)` - another parse or I/O error.
     pub fn read_block(&mut self) -> SbfResult<Option<SbfBlock>> {
         loop {
             // Try to find sync bytes in buffer
@@ -121,17 +137,20 @@ impl<R: Read> SbfReader<R> {
                         return Ok(Some(block));
                     }
                     Ok(None) => {
-                        // Need more data
-                        if !self.fill_buffer()? {
-                            // EOF reached
-                            if self.buffer.len() > 0 {
-                                // Partial data at end
-                                return Err(SbfError::IncompleteBlock {
-                                    needed: 8,
-                                    have: self.buffer.len(),
-                                });
+                        // Need more data to complete the block
+                        match self.fill_buffer()? {
+                            Fill::Filled => {}
+                            Fill::WouldBlock => return Err(SbfError::WouldBlock),
+                            Fill::Eof => {
+                                if !self.buffer.is_empty() {
+                                    // Genuinely truncated final block at real EOF
+                                    return Err(SbfError::IncompleteBlock {
+                                        needed: 8,
+                                        have: self.buffer.len(),
+                                    });
+                                }
+                                return Ok(None);
                             }
-                            return Ok(None);
                         }
                     }
                     Err(SbfError::InvalidSync) => {
@@ -145,7 +164,7 @@ impl<R: Read> SbfReader<R> {
                         self.stats.crc_errors += 1;
                         self.stats.bytes_skipped += 1;
                     }
-                    Err(_e) => {
+                    Err(_) => {
                         // Other parse error - skip sync and continue
                         self.buffer.remove(0);
                         self.stats.parse_errors += 1;
@@ -154,9 +173,19 @@ impl<R: Read> SbfReader<R> {
                     }
                 }
             } else {
-                // No sync found - need more data
-                if !self.fill_buffer()? {
-                    return Ok(None);
+                // No full sync in the buffer: discard the scanned bytes, but keep
+                // the last byte in case it is the first half of a sync split
+                // across reads (find_sync only scans 0..len-1). This bounds the
+                // buffer on garbage/no-sync streams and keeps find_sync O(n).
+                let len = self.buffer.len();
+                if len > 1 {
+                    self.stats.bytes_skipped += (len - 1) as u64;
+                    self.buffer.drain(0..len - 1);
+                }
+                match self.fill_buffer()? {
+                    Fill::Filled => {}
+                    Fill::WouldBlock => return Err(SbfError::WouldBlock),
+                    Fill::Eof => return Ok(None),
                 }
             }
 
@@ -181,7 +210,23 @@ impl<R: Read> SbfReader<R> {
             return Ok(None);
         }
 
-        let buffer = self.buffer.make_contiguous();
+        // Peek the declared block length (bytes 6..7) via O(1) indexing; this
+        // works regardless of where the ring boundary falls.
+        let peek_len = u16::from_le_bytes([self.buffer[6], self.buffer[7]]) as usize;
+        if peek_len >= MIN_BLOCK_LENGTH as usize && self.buffer.len() < peek_len {
+            return Ok(None); // wait for the rest of the block
+        }
+
+        // Fast path: if the whole block already lives in the contiguous front
+        // slice, parse it in place with no rotation. Only rotate the ring when
+        // the block straddles the boundary (or the length is invalid and needs
+        // the normal parse path to produce InvalidLength).
+        let front_len = self.buffer.as_slices().0.len();
+        let contiguous_front = peek_len >= MIN_BLOCK_LENGTH as usize && front_len >= peek_len;
+        if !contiguous_front {
+            self.buffer.make_contiguous();
+        }
+        let buffer = self.buffer.as_slices().0;
 
         // Parse header
         let header = SbfHeader::parse(&buffer[2..])?;
@@ -191,14 +236,10 @@ impl<R: Read> SbfReader<R> {
             return Ok(None);
         }
 
-        // Validate CRC if enabled
-        if self.validate_crc && !validate_block(&buffer[..total_len]) {
-            // Get stored and calculated CRC for error message
-            let stored_crc = u16::from_le_bytes([self.buffer[2], self.buffer[3]]);
-            return Err(SbfError::CrcMismatch {
-                expected: stored_crc,
-                actual: 0, // We don't recalculate here
-            });
+        // Validate CRC if enabled. `validate_crc` computes the CRC and returns
+        // it in the error, so `CrcMismatch.actual` carries the real value.
+        if self.validate_crc {
+            header.validate_crc(&buffer[..total_len])?;
         }
 
         // Parse block
@@ -207,17 +248,20 @@ impl<R: Read> SbfReader<R> {
         Ok(Some((block, consumed)))
     }
 
-    /// Fill buffer from source
-    fn fill_buffer(&mut self) -> SbfResult<bool> {
+    /// Fill buffer from source.
+    ///
+    /// Distinguishes end of stream (`Fill::Eof`) from a non-blocking source with
+    /// no data available right now (`Fill::WouldBlock`).
+    fn fill_buffer(&mut self) -> SbfResult<Fill> {
         let mut temp = [0u8; 4096];
         match self.inner.read(&mut temp) {
-            Ok(0) => Ok(false), // EOF
+            Ok(0) => Ok(Fill::Eof),
             Ok(n) => {
                 self.buffer.extend(&temp[..n]);
                 self.stats.bytes_read += n as u64;
-                Ok(true)
+                Ok(Fill::Filled)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Fill::WouldBlock),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => self.fill_buffer(),
             Err(e) => Err(SbfError::Io(e)),
         }
@@ -291,5 +335,38 @@ mod tests {
         let reader = Cursor::new(data).sbf_blocks();
 
         assert!(reader.validate_crc);
+    }
+
+    #[test]
+    fn crc_mismatch_reports_computed_actual() {
+        // 16-byte block; corrupt a body byte so the stored CRC no longer matches
+        // the recomputed one. Guards that CrcMismatch.actual is the real value.
+        let mut block = vec![0u8; 16];
+        block[0] = SBF_SYNC[0];
+        block[1] = SBF_SYNC[1];
+        block[4..6].copy_from_slice(&5922u16.to_le_bytes()); // EndOfMeas id, rev 0
+        block[6..8].copy_from_slice(&16u16.to_le_bytes()); // length
+        let stored = crate::crc::crc16_ccitt(&block[4..16]);
+        block[2..4].copy_from_slice(&stored.to_le_bytes());
+        block[12] ^= 0xFF; // corrupt body: computed CRC changes, stored stays
+        let computed = crate::crc::crc16_ccitt(&block[4..16]);
+        assert_ne!(stored, computed);
+
+        let mut reader = SbfReader::new(Cursor::new(block.clone()));
+        while reader.buffer.len() < block.len() {
+            match reader.fill_buffer().unwrap() {
+                Fill::Filled => {}
+                _ => break,
+            }
+        }
+
+        match reader.try_parse_block() {
+            Err(SbfError::CrcMismatch { expected, actual }) => {
+                assert_eq!(expected, stored);
+                assert_eq!(actual, computed);
+                assert_ne!(actual, 0);
+            }
+            other => panic!("expected CrcMismatch, got {other:?}"),
+        }
     }
 }
