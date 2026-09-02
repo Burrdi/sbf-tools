@@ -100,6 +100,11 @@ pub use blocks::{
     Meas3Satellite,
     // Measurement
     MeasEpochBlock,
+    MeasEpochMeasurementRaw,
+    MeasEpochType1Raw,
+    MeasEpochType2Raw,
+    MeasExtraBlock,
+    MeasExtraChannel,
     NtripClientStatusBlock,
     NtripConnectionSlot,
     NtripServerStatusBlock,

@@ -3,6 +3,7 @@
 use crate::error::{SbfError, SbfResult};
 use crate::header::SbfHeader;
 use crate::types::{SatelliteId, SignalType};
+use std::collections::HashSet;
 
 use super::block_ids;
 use super::dnu::{u16_or_none, u8_or_none, I32_DNU, U16_DNU};
@@ -13,7 +14,7 @@ use super::SbfBlockParse;
 // ============================================================================
 
 /// Raw Type1 sub-block data from MeasEpoch
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasEpochType1Raw {
     pub rx_channel: u8,
     pub signal_type: u8,
@@ -29,6 +30,69 @@ pub struct MeasEpochType1Raw {
     pub n2: u8,
 }
 
+impl MeasEpochType1Raw {
+    /// Unsigned MSB of the pseudorange from bits 0-3 of `Misc`.
+    pub fn code_msb(&self) -> u8 {
+        self.misc & 0x0f
+    }
+
+    /// Antenna ID from bits 5-7 of the Type field.
+    pub fn antenna_id(&self) -> u8 {
+        self.signal_type >> 5
+    }
+
+    /// Decoded global SBF signal number.
+    pub fn signal_number(&self) -> u8 {
+        signal_number(self.signal_type, self.obs_info)
+    }
+}
+
+/// Raw Type2 sub-block data from MeasEpoch.
+///
+/// Type2 measurements inherit their receiver channel and satellite from the
+/// preceding Type1 sub-block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeasEpochType2Raw {
+    pub signal_type: u8,
+    pub lock_time: u8,
+    pub cn0: u8,
+    pub offsets_msb: u8,
+    pub carrier_msb: i8,
+    pub obs_info: u8,
+    pub code_offset_lsb: u16,
+    pub carrier_lsb: u16,
+    pub doppler_offset_lsb: u16,
+}
+
+impl MeasEpochType2Raw {
+    /// Antenna ID from bits 5-7 of the Type field.
+    pub fn antenna_id(&self) -> u8 {
+        self.signal_type >> 5
+    }
+
+    /// Decoded global SBF signal number.
+    pub fn signal_number(&self) -> u8 {
+        signal_number(self.signal_type, self.obs_info)
+    }
+
+    /// Signed 3-bit MSB of the pseudorange offset.
+    pub fn code_offset_msb(&self) -> i8 {
+        sign_extend(self.offsets_msb & 0x07, 3)
+    }
+
+    /// Signed 5-bit MSB of the Doppler offset.
+    pub fn doppler_offset_msb(&self) -> i8 {
+        sign_extend(self.offsets_msb >> 3, 5)
+    }
+}
+
+/// Original SBF sub-block from which a processed measurement was decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MeasEpochMeasurementRaw {
+    Type1(MeasEpochType1Raw),
+    Type2(MeasEpochType2Raw),
+}
+
 // ============================================================================
 // Satellite Measurement (processed)
 // ============================================================================
@@ -40,12 +104,24 @@ pub struct SatelliteMeasurement {
     pub sat_id: SatelliteId,
     /// Signal type
     pub signal_type: SignalType,
+    /// Receiver tracking channel.
+    rx_channel: u8,
+    /// Antenna ID from bits 5-7 of the SBF Type field.
+    antenna_id: u8,
+    /// Decoded global SBF signal number.
+    signal_number: u8,
+    /// GLONASS frequency number, inherited by Type2 measurements.
+    glonass_frequency_number: Option<i8>,
+    /// Pseudorange in metres.
+    pseudorange_m: Option<f64>,
+    /// Carrier phase in cycles.
+    carrier_phase_cycles: Option<f64>,
+    /// Doppler in Hz, including the Type2 frequency-ratio reconstruction.
+    doppler_hz: Option<f64>,
+    /// Original Type1 or Type2 wire fields.
+    raw: MeasEpochMeasurementRaw,
     /// Raw CN0 value (use cn0_dbhz() for scaling per SBF spec)
     cn0_raw: u8,
-    /// Raw Doppler value (multiply by 0.0001 for Hz)
-    doppler_raw: i32,
-    /// Whether `doppler_raw` is available as an absolute Doppler value.
-    doppler_valid: bool,
     /// Raw lock time
     lock_time_raw: u16,
     /// Whether `lock_time_raw` is available.
@@ -55,6 +131,52 @@ pub struct SatelliteMeasurement {
 }
 
 impl SatelliteMeasurement {
+    /// Receiver tracking channel from the parent Type1 sub-block.
+    pub fn rx_channel(&self) -> u8 {
+        self.rx_channel
+    }
+
+    /// Antenna ID from bits 5-7 of the SBF Type field.
+    pub fn antenna_id(&self) -> u8 {
+        self.antenna_id
+    }
+
+    /// Decoded global SBF signal number.
+    pub fn signal_number(&self) -> u8 {
+        self.signal_number
+    }
+
+    /// GLONASS frequency number used to determine the carrier frequency.
+    pub fn glonass_frequency_number(&self) -> Option<i8> {
+        self.glonass_frequency_number
+    }
+
+    /// Pseudorange in metres, or `None` for the documented DNU value.
+    pub fn pseudorange_m(&self) -> Option<f64> {
+        self.pseudorange_m
+    }
+
+    /// Carrier phase in cycles, or `None` for DNU or an unknown wavelength.
+    pub fn carrier_phase_cycles(&self) -> Option<f64> {
+        self.carrier_phase_cycles
+    }
+
+    /// Carrier frequency in Hz used to reconstruct the phase.
+    pub fn carrier_frequency_hz(&self) -> Option<f64> {
+        carrier_frequency_hz(self.signal_type, self.glonass_frequency_number)
+    }
+
+    /// Carrier wavelength in metres used to reconstruct the phase.
+    pub fn carrier_wavelength_m(&self) -> Option<f64> {
+        self.carrier_frequency_hz()
+            .map(|frequency_hz| SPEED_OF_LIGHT_M_S / frequency_hz)
+    }
+
+    /// Original Type1 or Type2 wire fields.
+    pub fn raw(&self) -> &MeasEpochMeasurementRaw {
+        &self.raw
+    }
+
     /// Get CN0 in dB-Hz (scaled per SBF Reference Guide)
     pub fn cn0_dbhz(&self) -> f64 {
         self.cn0_dbhz_opt().unwrap_or(0.0)
@@ -91,16 +213,19 @@ impl SatelliteMeasurement {
 
     /// Get Doppler in Hz (scaled), or `None` when unavailable.
     pub fn doppler_hz_opt(&self) -> Option<f64> {
-        if self.doppler_valid {
-            Some(self.doppler_raw as f64 * 0.0001)
-        } else {
-            None
-        }
+        self.doppler_hz
     }
 
-    /// Get raw Doppler value
+    /// Get the raw absolute Type1 Doppler value.
+    ///
+    /// Type2 carries a Doppler offset instead of an absolute wire value; for
+    /// Type2 this legacy accessor returns the documented Type1 DNU sentinel.
+    /// Use [`Self::raw`] to inspect the original Type2 offset fields.
     pub fn doppler_raw(&self) -> i32 {
-        self.doppler_raw
+        match &self.raw {
+            MeasEpochMeasurementRaw::Type1(raw) => raw.doppler,
+            MeasEpochMeasurementRaw::Type2(_) => I32_DNU,
+        }
     }
 
     /// Get lock time in seconds.
@@ -138,6 +263,115 @@ impl SatelliteMeasurement {
     pub fn smoothing_active(&self) -> bool {
         (self.obs_info & 0x01) != 0
     }
+}
+
+const SPEED_OF_LIGHT_M_S: f64 = 299_792_458.0;
+
+fn sign_extend(value: u8, bits: u32) -> i8 {
+    let shift = 8 - bits;
+    ((value << shift) as i8) >> shift
+}
+
+fn signal_number(type_field: u8, obs_info: u8) -> u8 {
+    let sig_idx = type_field & 0x1f;
+    if sig_idx == 31 {
+        32 + ((obs_info >> 3) & 0x1f)
+    } else {
+        sig_idx
+    }
+}
+
+fn glonass_frequency_number(signal_number: u8, obs_info: u8) -> Option<i8> {
+    if (8..=11).contains(&signal_number) {
+        Some(((obs_info >> 3) & 0x1f) as i8 - 8)
+    } else {
+        None
+    }
+}
+
+fn carrier_frequency_hz(
+    signal_type: SignalType,
+    glonass_frequency_number: Option<i8>,
+) -> Option<f64> {
+    use SignalType::*;
+
+    let frequency_hz = match signal_type {
+        L1CA | L1C | L1PY | E1 | B1C | QZSSL1CA | QZSSL1C | QZSSL1S | QZSSL1CB | SBASL1
+        | NavICL1 => 1_575.42e6,
+        L2C | L2P | L2PY | QZSSL2C => 1_227.60e6,
+        L5 | E5a | B2a | QZSSL5 | QZSSL5S | SBASL5 | NavICL5 => 1_176.45e6,
+        E5b | B2I | B2b => 1_207.14e6,
+        E5AltBOC => 1_191.795e6,
+        E6 | QZSSL6 => 1_278.75e6,
+        B1I => 1_561.098e6,
+        B3I => 1_268.52e6,
+        G1CA | G1P => {
+            let frequency_number = glonass_frequency_number?;
+            1_602.0e6 + frequency_number as f64 * 562_500.0
+        }
+        G2CA | G2P => {
+            let frequency_number = glonass_frequency_number?;
+            1_246.0e6 + frequency_number as f64 * 437_500.0
+        }
+        G3 => 1_202.025e6,
+        LBand | Other(_) => return None,
+    };
+    Some(frequency_hz)
+}
+
+fn type1_pseudorange_m(raw: &MeasEpochType1Raw) -> Option<f64> {
+    let code_msb = raw.misc & 0x0f;
+    if code_msb == 0 && raw.code_lsb == 0 {
+        return None;
+    }
+
+    let millimetres = u64::from(code_msb) * 4_294_967_296 + u64::from(raw.code_lsb);
+    Some(millimetres as f64 * 0.001)
+}
+
+fn type2_pseudorange_m(parent_pseudorange_m: Option<f64>, raw: &MeasEpochType2Raw) -> Option<f64> {
+    let code_offset_msb = raw.code_offset_msb();
+    if code_offset_msb == -4 && raw.code_offset_lsb == 0 {
+        return None;
+    }
+
+    parent_pseudorange_m.map(|parent| {
+        parent + (code_offset_msb as f64 * 65_536.0 + f64::from(raw.code_offset_lsb)) * 0.001
+    })
+}
+
+fn compute_carrier_phase_cycles(
+    pseudorange_m: Option<f64>,
+    frequency_hz: Option<f64>,
+    carrier_msb: i8,
+    carrier_lsb: u16,
+) -> Option<f64> {
+    if carrier_msb == -128 && carrier_lsb == 0 {
+        return None;
+    }
+
+    Some(
+        pseudorange_m? / (SPEED_OF_LIGHT_M_S / frequency_hz?)
+            + (carrier_msb as f64 * 65_536.0 + f64::from(carrier_lsb)) * 0.001,
+    )
+}
+
+fn type2_doppler_hz(
+    parent_doppler_hz: Option<f64>,
+    parent_frequency_hz: Option<f64>,
+    frequency_hz: Option<f64>,
+    raw: &MeasEpochType2Raw,
+) -> Option<f64> {
+    let doppler_offset_msb = raw.doppler_offset_msb();
+    if doppler_offset_msb == -16 && raw.doppler_offset_lsb == 0 {
+        return None;
+    }
+
+    let frequency_ratio = frequency_hz? / parent_frequency_hz?;
+    Some(
+        parent_doppler_hz? * frequency_ratio
+            + (doppler_offset_msb as f64 * 65_536.0 + f64::from(raw.doppler_offset_lsb)) * 0.0001,
+    )
 }
 
 // ============================================================================
@@ -185,6 +419,15 @@ impl MeasEpochBlock {
 
     /// Get number of satellites with measurements
     pub fn num_satellites(&self) -> usize {
+        self.measurements
+            .iter()
+            .map(|measurement| &measurement.sat_id)
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
+    /// Get total number of signal measurements, including Type2 signals.
+    pub fn num_measurements(&self) -> usize {
         self.measurements.len()
     }
 
@@ -199,6 +442,25 @@ impl MeasEpochBlock {
     /// Get all valid CN0 measurements
     pub fn valid_cn0_measurements(&self) -> Vec<&SatelliteMeasurement> {
         self.measurements.iter().filter(|m| m.cn0_valid()).collect()
+    }
+
+    /// Find the companion MeasExtra channel for a decoded measurement.
+    ///
+    /// The epoch timestamp is checked before matching antenna, receiver
+    /// channel, and global SBF signal number.
+    pub fn matching_extra_channel<'a>(
+        &self,
+        extra: &'a MeasExtraBlock,
+        measurement: &SatelliteMeasurement,
+    ) -> Option<&'a MeasExtraChannel> {
+        if self.wnc != extra.wnc || self.tow_ms != extra.tow_ms {
+            return None;
+        }
+
+        extra
+            .channels
+            .iter()
+            .find(|channel| channel.matches_measurement(measurement))
     }
 }
 
@@ -233,8 +495,10 @@ impl SbfBlockParse for MeasEpochBlock {
         let common_flags = data[15];
         let cum_clk_jumps = data[16];
 
-        if sb1_length == 0 {
-            return Err(SbfError::ParseError("MeasEpoch SB1Length is zero".into()));
+        if n1 > 0 && sb1_length < 20 {
+            return Err(SbfError::ParseError(
+                "MeasEpoch SB1Length is smaller than the Type1 layout".into(),
+            ));
         }
 
         let sb1_length_usize = sb1_length as usize;
@@ -247,16 +511,6 @@ impl SbfBlockParse for MeasEpochBlock {
         }
 
         let mut measurements = Vec::new();
-
-        // Helper to extract signal number from type field
-        let signal_number = |type_field: u8, obs_info: u8| -> u8 {
-            let sig_idx = type_field & 0x1F;
-            if sig_idx == 31 {
-                32 + ((obs_info >> 3) & 0x1F)
-            } else {
-                sig_idx
-            }
-        };
 
         for _ in 0..n1 {
             if offset + sb1_length_usize > data.len() {
@@ -271,134 +525,137 @@ impl SbfBlockParse for MeasEpochBlock {
             // 14: CarrierMSB, 15: CN0, 16-17: LockTime
             // 18: ObsInfo, 19: N2
 
-            let svid = data[offset + 2];
-            let type_field = data[offset + 1];
-
-            let (doppler, doppler_valid) = if sb1_length_usize > 11 {
-                let raw = i32::from_le_bytes([
+            let raw_type1 = MeasEpochType1Raw {
+                rx_channel: data[offset],
+                signal_type: data[offset + 1],
+                svid: data[offset + 2],
+                misc: data[offset + 3],
+                code_lsb: u32::from_le_bytes([
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]),
+                doppler: i32::from_le_bytes([
                     data[offset + 8],
                     data[offset + 9],
                     data[offset + 10],
                     data[offset + 11],
-                ]);
-                (raw, raw != I32_DNU)
-            } else {
-                (0, false)
+                ]),
+                carrier_lsb: u16::from_le_bytes([data[offset + 12], data[offset + 13]]),
+                carrier_msb: data[offset + 14] as i8,
+                cn0: data[offset + 15],
+                lock_time: u16::from_le_bytes([data[offset + 16], data[offset + 17]]),
+                obs_info: data[offset + 18],
+                n2: data[offset + 19],
             };
 
-            let cn0_raw = if sb1_length_usize > 15 {
-                data[offset + 15]
-            } else {
-                255
-            };
+            let sig_num = signal_number(raw_type1.signal_type, raw_type1.obs_info);
+            let signal_type = SignalType::from_signal_number(sig_num);
+            let glo_frequency_number = glonass_frequency_number(sig_num, raw_type1.obs_info);
+            let frequency_hz = carrier_frequency_hz(signal_type, glo_frequency_number);
+            let pseudorange_m = type1_pseudorange_m(&raw_type1);
+            let carrier_phase_cycles = compute_carrier_phase_cycles(
+                pseudorange_m,
+                frequency_hz,
+                raw_type1.carrier_msb,
+                raw_type1.carrier_lsb,
+            );
+            let doppler_hz =
+                (raw_type1.doppler != I32_DNU).then_some(raw_type1.doppler as f64 * 0.0001);
+            let lock_time_valid = raw_type1.lock_time != U16_DNU;
+            let sat_id = SatelliteId::from_svid(raw_type1.svid);
 
-            let (lock_time, lock_time_valid) = if sb1_length_usize > 17 {
-                let raw = u16::from_le_bytes([data[offset + 16], data[offset + 17]]);
-                (raw, raw != U16_DNU)
-            } else {
-                (0, false)
-            };
-
-            let obs_info = if sb1_length_usize > 18 {
-                data[offset + 18]
-            } else {
-                0
-            };
-
-            let n2 = if sb1_length_usize > 19 {
-                data[offset + 19]
-            } else {
-                0
-            };
-
-            // Parse primary signal measurement
-            if let Some(sat_id) = SatelliteId::from_svid(svid) {
-                let sig_num = signal_number(type_field, obs_info);
-                let signal_type = SignalType::from_signal_number(sig_num);
-
+            if let Some(sat_id) = &sat_id {
                 measurements.push(SatelliteMeasurement {
                     sat_id: sat_id.clone(),
                     signal_type,
-                    cn0_raw,
-                    doppler_raw: doppler,
-                    doppler_valid,
-                    lock_time_raw: lock_time,
+                    rx_channel: raw_type1.rx_channel,
+                    antenna_id: raw_type1.signal_type >> 5,
+                    signal_number: sig_num,
+                    glonass_frequency_number: glo_frequency_number,
+                    pseudorange_m,
+                    carrier_phase_cycles,
+                    doppler_hz,
+                    raw: MeasEpochMeasurementRaw::Type1(raw_type1.clone()),
+                    cn0_raw: raw_type1.cn0,
+                    lock_time_raw: raw_type1.lock_time,
                     lock_time_valid,
-                    obs_info,
+                    obs_info: raw_type1.obs_info,
                 });
+            }
 
-                offset += sb1_length_usize;
+            offset += sb1_length_usize;
 
-                // Parse Type2 sub-blocks (additional signals for same satellite)
-                if sb2_length_usize > 0 {
-                    for _ in 0..n2 {
-                        if offset + sb2_length_usize > data.len() {
-                            return Err(SbfError::ParseError(
-                                "MeasEpoch SB2 exceeds block length".into(),
-                            ));
-                        }
-
-                        // Type-2 sub-block structure:
-                        // 0: Type, 1: LockTime (short), 2: CN0
-                        // 3: OffsetMSB, 4: CarrierMSB, 5: ObsInfo
-                        // 6-7: CodeOffsetLSB, 8-9: CarrierLSB, 10-11: DopplerOffsetLSB
-
-                        let type2_field = data[offset];
-                        let cn0_raw_2 = if sb2_length_usize > 2 {
-                            data[offset + 2]
-                        } else {
-                            255
-                        };
-                        let (lock_time_2, lock_time_valid_2) = if sb2_length_usize > 1 {
-                            let raw = data[offset + 1];
-                            (raw as u16, u8_or_none(raw).is_some())
-                        } else {
-                            (0, false)
-                        };
-                        let obs_info_2 = if sb2_length_usize > 5 {
-                            data[offset + 5]
-                        } else {
-                            0
-                        };
-
-                        let sig_num_2 = signal_number(type2_field, obs_info_2);
-                        let signal_type_2 = SignalType::from_signal_number(sig_num_2);
-
-                        measurements.push(SatelliteMeasurement {
-                            sat_id: sat_id.clone(),
-                            signal_type: signal_type_2,
-                            cn0_raw: cn0_raw_2,
-                            doppler_raw: 0, // Type2 has offset, not absolute
-                            doppler_valid: false,
-                            lock_time_raw: lock_time_2,
-                            lock_time_valid: lock_time_valid_2,
-                            obs_info: obs_info_2,
-                        });
-
-                        offset += sb2_length_usize;
-                    }
+            // Parse Type2 sub-blocks (additional signals for the same satellite).
+            if raw_type1.n2 > 0 {
+                if sb2_length_usize < 12 {
+                    return Err(SbfError::ParseError(
+                        "MeasEpoch SB2Length is smaller than the Type2 layout".into(),
+                    ));
                 }
-            } else {
-                // Skip invalid SVID
-                offset += sb1_length_usize;
-                if sb2_length_usize > 0 {
-                    let n2_skip = if sb1_length_usize > 19 {
-                        data[offset - sb1_length_usize + 19]
-                    } else {
-                        0
-                    };
-                    let skip_bytes =
-                        sb2_length_usize
-                            .checked_mul(n2_skip as usize)
-                            .ok_or_else(|| {
-                                SbfError::ParseError("MeasEpoch SB2 length overflow".into())
-                            })?;
-                    if offset + skip_bytes > data.len() {
+
+                for _ in 0..raw_type1.n2 {
+                    if offset + sb2_length_usize > data.len() {
                         return Err(SbfError::ParseError(
                             "MeasEpoch SB2 exceeds block length".into(),
                         ));
                     }
-                    offset += skip_bytes;
+
+                    // Type-2 sub-block structure:
+                    // 0: Type, 1: LockTime (short), 2: CN0
+                    // 3: OffsetMSB, 4: CarrierMSB, 5: ObsInfo
+                    // 6-7: CodeOffsetLSB, 8-9: CarrierLSB, 10-11: DopplerOffsetLSB
+
+                    let raw_type2 = MeasEpochType2Raw {
+                        signal_type: data[offset],
+                        lock_time: data[offset + 1],
+                        cn0: data[offset + 2],
+                        offsets_msb: data[offset + 3],
+                        carrier_msb: data[offset + 4] as i8,
+                        obs_info: data[offset + 5],
+                        code_offset_lsb: u16::from_le_bytes([data[offset + 6], data[offset + 7]]),
+                        carrier_lsb: u16::from_le_bytes([data[offset + 8], data[offset + 9]]),
+                        doppler_offset_lsb: u16::from_le_bytes([
+                            data[offset + 10],
+                            data[offset + 11],
+                        ]),
+                    };
+
+                    let sig_num_2 = signal_number(raw_type2.signal_type, raw_type2.obs_info);
+                    let signal_type_2 = SignalType::from_signal_number(sig_num_2);
+                    let frequency_hz_2 = carrier_frequency_hz(signal_type_2, glo_frequency_number);
+                    let pseudorange_m_2 = type2_pseudorange_m(pseudorange_m, &raw_type2);
+                    let carrier_phase_cycles_2 = compute_carrier_phase_cycles(
+                        pseudorange_m_2,
+                        frequency_hz_2,
+                        raw_type2.carrier_msb,
+                        raw_type2.carrier_lsb,
+                    );
+                    let doppler_hz_2 =
+                        type2_doppler_hz(doppler_hz, frequency_hz, frequency_hz_2, &raw_type2);
+                    let lock_time_2 = u16::from(raw_type2.lock_time);
+
+                    if let Some(sat_id) = &sat_id {
+                        measurements.push(SatelliteMeasurement {
+                            sat_id: sat_id.clone(),
+                            signal_type: signal_type_2,
+                            rx_channel: raw_type1.rx_channel,
+                            antenna_id: raw_type2.signal_type >> 5,
+                            signal_number: sig_num_2,
+                            glonass_frequency_number: glo_frequency_number,
+                            pseudorange_m: pseudorange_m_2,
+                            carrier_phase_cycles: carrier_phase_cycles_2,
+                            doppler_hz: doppler_hz_2,
+                            raw: MeasEpochMeasurementRaw::Type2(raw_type2.clone()),
+                            cn0_raw: raw_type2.cn0,
+                            lock_time_raw: lock_time_2,
+                            lock_time_valid: raw_type2.lock_time != u8::MAX,
+                            obs_info: raw_type2.obs_info,
+                        });
+                    }
+
+                    offset += sb2_length_usize;
                 }
             }
         }
@@ -452,6 +709,13 @@ pub struct MeasExtraChannel {
 }
 
 impl MeasExtraChannel {
+    /// Whether this channel complements a decoded MeasEpoch measurement.
+    pub fn matches_measurement(&self, measurement: &SatelliteMeasurement) -> bool {
+        self.rx_channel == measurement.rx_channel
+            && self.antenna_id() == measurement.antenna_id
+            && self.signal_number == measurement.signal_number
+    }
+
     /// Get raw signal type value
     pub fn signal_type_raw(&self) -> u8 {
         self.signal_type_raw
@@ -825,18 +1089,50 @@ mod tests {
     use crate::header::SbfHeader;
     use crate::types::Constellation;
 
+    fn test_measurement(
+        signal_type: SignalType,
+        cn0_raw: u8,
+        doppler_raw: i32,
+        doppler_hz: Option<f64>,
+        lock_time_raw: u16,
+        lock_time_valid: bool,
+    ) -> SatelliteMeasurement {
+        let raw = MeasEpochType1Raw {
+            rx_channel: 1,
+            signal_type: 0,
+            svid: 1,
+            misc: 0,
+            code_lsb: 0,
+            doppler: doppler_raw,
+            carrier_lsb: 0,
+            carrier_msb: -128,
+            cn0: cn0_raw,
+            lock_time: lock_time_raw,
+            obs_info: 0,
+            n2: 0,
+        };
+
+        SatelliteMeasurement {
+            sat_id: SatelliteId::new(Constellation::GPS, 1),
+            signal_type,
+            rx_channel: 1,
+            antenna_id: 0,
+            signal_number: 0,
+            glonass_frequency_number: None,
+            pseudorange_m: None,
+            carrier_phase_cycles: None,
+            doppler_hz,
+            raw: MeasEpochMeasurementRaw::Type1(raw),
+            cn0_raw,
+            lock_time_raw,
+            lock_time_valid,
+            obs_info: 0,
+        }
+    }
+
     #[test]
     fn test_satellite_measurement_cn0() {
-        let meas = SatelliteMeasurement {
-            sat_id: SatelliteId::new(Constellation::GPS, 1),
-            signal_type: SignalType::L1CA,
-            cn0_raw: 160, // 160 * 0.25 + 10 = 50 dB-Hz
-            doppler_raw: 1000,
-            doppler_valid: true,
-            lock_time_raw: 10,
-            lock_time_valid: true,
-            obs_info: 0,
-        };
+        let meas = test_measurement(SignalType::L1CA, 160, 1000, Some(0.1), 10, true);
 
         assert_eq!(meas.cn0_dbhz(), 50.0);
         assert_eq!(meas.cn0_dbhz_opt(), Some(50.0));
@@ -847,32 +1143,15 @@ mod tests {
 
     #[test]
     fn test_satellite_measurement_cn0_gps_p_no_offset() {
-        let meas = SatelliteMeasurement {
-            sat_id: SatelliteId::new(Constellation::GPS, 1),
-            signal_type: SignalType::L1PY, // GPS L1P (signal number 1)
-            cn0_raw: 160,                  // 160 * 0.25 = 40 dB-Hz (no +10 dB)
-            doppler_raw: 1000,
-            doppler_valid: true,
-            lock_time_raw: 10,
-            lock_time_valid: true,
-            obs_info: 0,
-        };
+        // GPS L1P (signal number 1) has no +10 dB offset.
+        let meas = test_measurement(SignalType::L1PY, 160, 1000, Some(0.1), 10, true);
 
         assert_eq!(meas.cn0_dbhz(), 40.0);
     }
 
     #[test]
     fn test_satellite_measurement_invalid_cn0() {
-        let meas = SatelliteMeasurement {
-            sat_id: SatelliteId::new(Constellation::GPS, 1),
-            signal_type: SignalType::L1CA,
-            cn0_raw: 255,
-            doppler_raw: 0,
-            doppler_valid: false,
-            lock_time_raw: 0,
-            lock_time_valid: false,
-            obs_info: 0,
-        };
+        let meas = test_measurement(SignalType::L1CA, 255, 0, None, 0, false);
 
         assert!(!meas.cn0_valid());
         assert_eq!(meas.cn0_dbhz_opt(), None);
@@ -882,16 +1161,7 @@ mod tests {
     #[test]
     fn test_lock_time_encoding() {
         // Linear encoding (seconds)
-        let meas = SatelliteMeasurement {
-            sat_id: SatelliteId::new(Constellation::GPS, 1),
-            signal_type: SignalType::L1CA,
-            cn0_raw: 160,
-            doppler_raw: 0,
-            doppler_valid: true,
-            lock_time_raw: 30,
-            lock_time_valid: true,
-            obs_info: 0,
-        };
+        let meas = test_measurement(SignalType::L1CA, 160, 0, Some(0.0), 30, true);
         assert_eq!(meas.lock_time_seconds(), 30.0);
         assert_eq!(meas.lock_time_seconds_opt(), Some(30.0));
 
@@ -905,16 +1175,7 @@ mod tests {
 
     #[test]
     fn test_satellite_measurement_doppler_and_lock_time_dnu() {
-        let meas = SatelliteMeasurement {
-            sat_id: SatelliteId::new(Constellation::GPS, 1),
-            signal_type: SignalType::L1CA,
-            cn0_raw: 160,
-            doppler_raw: I32_DNU,
-            doppler_valid: false,
-            lock_time_raw: U16_DNU,
-            lock_time_valid: false,
-            obs_info: 0,
-        };
+        let meas = test_measurement(SignalType::L1CA, 160, I32_DNU, None, U16_DNU, false);
 
         assert_eq!(meas.doppler_raw(), I32_DNU);
         assert_eq!(meas.doppler_hz_opt(), None);
@@ -922,6 +1183,189 @@ mod tests {
         assert_eq!(meas.lock_time_raw(), U16_DNU);
         assert_eq!(meas.lock_time_seconds_opt(), None);
         assert_eq!(meas.lock_time_seconds(), 0.0);
+    }
+
+    #[test]
+    fn meas_epoch_decodes_type1_and_type2_observables_and_preserves_raw_fields() {
+        let mut data = vec![0u8; 50];
+        data[12] = 1; // N1
+        data[13] = 20; // SB1Length
+        data[14] = 12; // SB2Length
+        data[17] = 0; // Reserved in revision 1
+
+        let sb1 = 18;
+        data[sb1] = 7; // RxChannel
+        data[sb1 + 1] = 0; // GPS L1CA, antenna 0
+        data[sb1 + 2] = 1; // GPS G01
+        data[sb1 + 3] = 4; // CodeMSB
+        data[sb1 + 4..sb1 + 8].copy_from_slice(&3_000_000_000_u32.to_le_bytes());
+        data[sb1 + 8..sb1 + 12].copy_from_slice(&(-123_456_i32).to_le_bytes());
+        data[sb1 + 12..sb1 + 14].copy_from_slice(&12_345_u16.to_le_bytes());
+        data[sb1 + 14] = (-2_i8) as u8;
+        data[sb1 + 15] = 160;
+        data[sb1 + 16..sb1 + 18].copy_from_slice(&30_u16.to_le_bytes());
+        data[sb1 + 18] = 0;
+        data[sb1 + 19] = 1; // One Type2 signal
+
+        let sb2 = sb1 + 20;
+        data[sb2] = 3; // GPS L2C, antenna 0
+        data[sb2 + 1] = 5;
+        data[sb2 + 2] = 140;
+        data[sb2 + 3] = 0x0f; // CodeOffsetMSB=-1, DopplerOffsetMSB=1
+        data[sb2 + 4] = 1;
+        data[sb2 + 5] = 0;
+        data[sb2 + 6..sb2 + 8].copy_from_slice(&1_000_u16.to_le_bytes());
+        data[sb2 + 8..sb2 + 10].copy_from_slice(&2_000_u16.to_le_bytes());
+        data[sb2 + 10..sb2 + 12].copy_from_slice(&2_000_u16.to_le_bytes());
+
+        let header = SbfHeader {
+            crc: 0,
+            block_id: block_ids::MEAS_EPOCH,
+            block_rev: 1,
+            length: 52,
+            tow_ms: 123_456,
+            wnc: 2_400,
+        };
+
+        let epoch = MeasEpochBlock::parse(&header, &data).expect("parse MeasEpoch");
+        assert_eq!(epoch.measurements.len(), 2);
+        assert_eq!(epoch.num_satellites(), 1);
+        assert_eq!(epoch.num_measurements(), 2);
+
+        let primary = &epoch.measurements[0];
+        let expected_pr1 = (4_u64 * 4_294_967_296 + 3_000_000_000_u64) as f64 * 0.001;
+        let l1_wavelength = SPEED_OF_LIGHT_M_S / 1_575.42e6;
+        let expected_l1 = expected_pr1 / l1_wavelength + (-2.0 * 65_536.0 + 12_345.0) * 0.001;
+        assert_eq!(primary.sat_id.key(), "G01");
+        assert_eq!(primary.signal_type, SignalType::L1CA);
+        assert_eq!(primary.rx_channel(), 7);
+        assert_eq!(primary.antenna_id(), 0);
+        assert_eq!(primary.signal_number(), 0);
+        assert!((primary.pseudorange_m().unwrap() - expected_pr1).abs() < 1e-9);
+        assert!((primary.carrier_phase_cycles().unwrap() - expected_l1).abs() < 1e-9);
+        assert!((primary.doppler_hz_opt().unwrap() + 12.3456).abs() < 1e-12);
+        let MeasEpochMeasurementRaw::Type1(raw1) = primary.raw() else {
+            panic!("expected Type1 raw data");
+        };
+        assert_eq!(raw1.code_msb(), 4);
+        assert_eq!(raw1.code_lsb, 3_000_000_000);
+        assert_eq!(raw1.carrier_msb, -2);
+        assert_eq!(raw1.carrier_lsb, 12_345);
+
+        let secondary = &epoch.measurements[1];
+        let expected_pr2 = expected_pr1 + (-65_536.0 + 1_000.0) * 0.001;
+        let l2_frequency = 1_227.60e6;
+        let l2_wavelength = SPEED_OF_LIGHT_M_S / l2_frequency;
+        let expected_l2 = expected_pr2 / l2_wavelength + (65_536.0 + 2_000.0) * 0.001;
+        let expected_d2 = -12.3456 * (l2_frequency / 1_575.42e6) + (65_536.0 + 2_000.0) * 0.0001;
+        assert_eq!(secondary.sat_id.key(), "G01");
+        assert_eq!(secondary.signal_type, SignalType::L2C);
+        assert_eq!(secondary.rx_channel(), 7);
+        assert!((secondary.pseudorange_m().unwrap() - expected_pr2).abs() < 1e-9);
+        assert!((secondary.carrier_phase_cycles().unwrap() - expected_l2).abs() < 1e-9);
+        assert!((secondary.doppler_hz_opt().unwrap() - expected_d2).abs() < 1e-12);
+        let MeasEpochMeasurementRaw::Type2(raw2) = secondary.raw() else {
+            panic!("expected Type2 raw data");
+        };
+        assert_eq!(raw2.code_offset_msb(), -1);
+        assert_eq!(raw2.doppler_offset_msb(), 1);
+        assert_eq!(raw2.code_offset_lsb, 1_000);
+        assert_eq!(raw2.carrier_lsb, 2_000);
+        assert_eq!(raw2.doppler_offset_lsb, 2_000);
+    }
+
+    #[test]
+    fn meas_epoch_handles_dnu_and_glonass_frequency_number() {
+        let raw1 = MeasEpochType1Raw {
+            rx_channel: 1,
+            signal_type: 8,
+            svid: 38,
+            misc: 0,
+            code_lsb: 0,
+            doppler: I32_DNU,
+            carrier_lsb: 0,
+            carrier_msb: -128,
+            cn0: u8::MAX,
+            lock_time: U16_DNU,
+            obs_info: 1 << 3, // FreqNr field 1 means GLONASS frequency number -7.
+            n2: 0,
+        };
+        assert_eq!(type1_pseudorange_m(&raw1), None);
+        assert_eq!(glonass_frequency_number(8, raw1.obs_info), Some(-7));
+        assert_eq!(
+            carrier_frequency_hz(SignalType::G1CA, Some(-7)),
+            Some(1_602.0e6 - 7.0 * 562_500.0)
+        );
+        assert_eq!(
+            compute_carrier_phase_cycles(None, Some(1_575.42e6), -128, 0),
+            None
+        );
+
+        let raw2 = MeasEpochType2Raw {
+            signal_type: 3,
+            lock_time: u8::MAX,
+            cn0: u8::MAX,
+            offsets_msb: 0x84, // CodeOffsetMSB=-4, DopplerOffsetMSB=-16.
+            carrier_msb: -128,
+            obs_info: 0,
+            code_offset_lsb: 0,
+            carrier_lsb: 0,
+            doppler_offset_lsb: 0,
+        };
+        assert_eq!(raw2.code_offset_msb(), -4);
+        assert_eq!(raw2.doppler_offset_msb(), -16);
+        assert_eq!(type2_pseudorange_m(Some(20_000_000.0), &raw2), None);
+        assert_eq!(
+            type2_doppler_hz(Some(1.0), Some(1.0), Some(1.0), &raw2),
+            None
+        );
+    }
+
+    #[test]
+    fn meas_epoch_matches_meas_extra_by_epoch_channel_antenna_and_signal() {
+        let measurement = test_measurement(SignalType::L1CA, 160, 0, Some(0.0), 30, true);
+        let epoch = MeasEpochBlock {
+            tow_ms: 10_000,
+            wnc: 2_400,
+            n1: 1,
+            sb1_length: 20,
+            sb2_length: 12,
+            common_flags: 0,
+            cum_clk_jumps: 0,
+            measurements: vec![measurement],
+        };
+        let channel = MeasExtraChannel {
+            rx_channel: 1,
+            signal_type: SignalType::L1CA,
+            signal_type_raw: 0,
+            signal_number: 0,
+            mp_correction_raw: 0,
+            smoothing_correction_raw: 0,
+            code_var_raw: 1,
+            carrier_var_raw: 1,
+            lock_time_raw: 30,
+            cum_loss_cont: 0,
+            car_mp_correction_raw: None,
+            info: 0,
+            misc_raw: None,
+        };
+        let mut extra = MeasExtraBlock {
+            tow_ms: 10_000,
+            wnc: 2_400,
+            n: 1,
+            sb_length: 14,
+            doppler_var_factor: 1.0,
+            channels: vec![channel],
+        };
+
+        assert!(epoch
+            .matching_extra_channel(&extra, &epoch.measurements[0])
+            .is_some());
+
+        extra.tow_ms += 1;
+        assert!(epoch
+            .matching_extra_channel(&extra, &epoch.measurements[0])
+            .is_none());
     }
 
     #[test]

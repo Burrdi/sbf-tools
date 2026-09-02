@@ -306,6 +306,46 @@ Anything else falls back to:
 `block_name(id)` and `fallback_name(id)` are there if you need stable naming for IDs you are not
 decoding yet.
 
+## MeasEpoch observables
+
+`MeasEpoch` measurements preserve their original Type1 or Type2 wire fields through
+`SatelliteMeasurement::raw()` and expose decoded observables in physical units:
+
+```rust
+use sbf_tools::{MeasEpochMeasurementRaw, SbfBlock};
+
+fn inspect(block: &SbfBlock) {
+    let SbfBlock::MeasEpoch(epoch) = block else {
+        return;
+    };
+
+    for measurement in &epoch.measurements {
+        println!(
+            "{} {} PR={:?}m L={:?}cycles D={:?}Hz raw={:?}",
+            measurement.sat_id,
+            measurement.signal_type,
+            measurement.pseudorange_m(),
+            measurement.carrier_phase_cycles(),
+            measurement.doppler_hz_opt(),
+            measurement.raw(),
+        );
+
+        if let MeasEpochMeasurementRaw::Type2(raw) = measurement.raw() {
+            println!("signed code-offset MSB={}", raw.code_offset_msb());
+        }
+    }
+}
+```
+
+Type2 pseudorange, carrier phase, and Doppler are reconstructed from their parent Type1
+measurement. GLONASS carrier frequencies use the frequency number carried by the parent Type1
+observation. Documented do-not-use values and signals without a known carrier frequency return
+`None` rather than a numeric zero.
+
+`MeasExtra` is a same-epoch companion, not a replacement for `MeasEpoch`. Use
+`MeasEpochBlock::matching_extra_channel()` to match it by timestamp, antenna, receiver channel,
+and signal number. See `examples/decode_meas_epoch.rs` for complete epoch collection and output.
+
 ## Meas3
 
 `Meas3Ranges` is only one piece of a complete Meas3 epoch. To recover code, carrier, C/N0,
