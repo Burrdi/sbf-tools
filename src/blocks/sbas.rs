@@ -866,20 +866,21 @@ impl SbfBlockParse for GeoServiceLevelBlock {
     const BLOCK_ID: u16 = block_ids::GEO_SERVICE_LEVEL;
 
     fn parse(header: &SbfHeader, data: &[u8]) -> SbfResult<Self> {
-        const MIN_LEN: usize = 21;
+        const MIN_LEN: usize = 22;
         if data.len() < MIN_LEN {
             return Err(SbfError::ParseError("GEOServiceLevel too short".into()));
         }
 
         let prn = data[12];
-        let iods = data[13];
-        let nr_messages = data[14];
-        let message_nr = data[15];
-        let priority_code = data[16];
-        let d_udrei_in = data[17];
-        let d_udrei_out = data[18];
-        let n = data[19] as usize;
-        let sb_length = data[20] as usize;
+        // data[13] is reserved and must be skipped.
+        let iods = data[14];
+        let nr_messages = data[15];
+        let message_nr = data[16];
+        let priority_code = data[17];
+        let d_udrei_in = data[18];
+        let d_udrei_out = data[19];
+        let n = data[20] as usize;
+        let sb_length = data[21] as usize;
 
         if sb_length < 7 {
             return Err(SbfError::ParseError(
@@ -888,7 +889,7 @@ impl SbfBlockParse for GeoServiceLevelBlock {
         }
 
         let mut regions = Vec::with_capacity(n);
-        let mut offset = 21;
+        let mut offset = 22;
 
         for _ in 0..n {
             if offset + sb_length > data.len() {
@@ -1686,21 +1687,22 @@ mod tests {
     #[test]
     fn test_geo_service_level_parse() {
         let header = header_for(5917, 3000, 2000);
-        let mut data = vec![0u8; 28];
+        let mut data = vec![0u8; 29];
         data[12] = 124;
-        data[13] = 1;
-        data[14] = 2;
-        data[15] = 0;
+        data[13] = 0xff; // Reserved; must not shift IODS.
+        data[14] = 1;
+        data[15] = 2;
         data[16] = 0;
-        data[17] = 1;
-        data[18] = 2;
-        data[19] = 1;
-        data[20] = 7;
-        data[21] = 45i8 as u8;
-        data[22] = 50i8 as u8;
-        data[23..25].copy_from_slice(&(-120i16).to_le_bytes());
-        data[25..27].copy_from_slice(&(-115i16).to_le_bytes());
-        data[27] = 0;
+        data[17] = 0;
+        data[18] = 1;
+        data[19] = 2;
+        data[20] = 1;
+        data[21] = 7;
+        data[22] = 45i8 as u8;
+        data[23] = 50i8 as u8;
+        data[24..26].copy_from_slice(&(-120i16).to_le_bytes());
+        data[26..28].copy_from_slice(&(-115i16).to_le_bytes());
+        data[28] = 0;
 
         let block = GeoServiceLevelBlock::parse(&header, &data).unwrap();
         assert_eq!(block.tow_seconds(), 3.0);
@@ -1723,9 +1725,9 @@ mod tests {
     #[test]
     fn test_geo_service_level_truncated_regions() {
         let header = header_for(5917, 0, 0);
-        let mut data = vec![0u8; 28];
-        data[19] = 2;
-        data[20] = 7;
+        let mut data = vec![0u8; 29];
+        data[20] = 2;
+        data[21] = 7;
         assert!(GeoServiceLevelBlock::parse(&header, &data).is_err());
     }
 

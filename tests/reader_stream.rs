@@ -53,6 +53,14 @@ fn with_bad_crc(mut block: Vec<u8>) -> Vec<u8> {
     block
 }
 
+fn decode_hex(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() & 1, 0);
+    (0..value.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&value[offset..offset + 2], 16).unwrap())
+        .collect()
+}
+
 #[test]
 fn reader_resynchronizes_after_crc_error_and_preserves_unknown_block() {
     let receiver_time = build_block(
@@ -135,6 +143,76 @@ fn reader_reports_incomplete_final_block() {
     };
     assert_eq!(needed, 8);
     assert!(have >= 2);
+}
+
+#[test]
+fn reader_reports_known_block_parse_error_and_resumes_at_next_block() {
+    let too_short_gps_nav = build_block(block_ids::GPS_NAV, 0, 3_000, TEST_WNC, &[]);
+    let end_of_meas = build_block(block_ids::END_OF_MEAS, 0, 3_001, TEST_WNC, &[]);
+    let mut stream = too_short_gps_nav;
+    stream.extend_from_slice(&end_of_meas);
+
+    let mut reader = Cursor::new(stream).sbf_blocks();
+
+    let error = reader.read_block().unwrap_err();
+    assert!(matches!(error, SbfError::ParseError(message) if message == "GPSNav too short"));
+
+    let parsed = reader.read_block().unwrap().unwrap();
+    assert!(matches!(parsed, SbfBlock::EndOfMeas(_)));
+    assert!(reader.read_block().unwrap().is_none());
+
+    let stats = reader.stats();
+    assert_eq!(stats.blocks_parsed, 1);
+    assert_eq!(stats.parse_errors, 1);
+    assert_eq!(stats.bytes_skipped, 0);
+}
+
+#[test]
+fn repository_gps_nav_fixture_parses_at_its_declared_length() {
+    // First GPSNav block from SbfParser/sbf_files/all_blocks_0000.sbf.
+    let fixture = decode_hex(concat!(
+        "2440b64003178c00805243173f0901ff3f0101000000e503e5e500ff000020b2",
+        "e00a06000000000000005c2db0b08c3900a015c200b8c430000080f4b60adc3f",
+        "0000f4b5000000405491413f00b828370000e0e5b921b440e00a06000000a033",
+        "00008051414be43f0000b032000000a02b8bd33f00a836430000008c00f7af3f",
+        "006e31b10080caae3f013f01"
+    ));
+    assert_eq!(fixture.len(), 140);
+
+    let mut reader = Cursor::new(fixture).sbf_blocks();
+    let block = reader.read_block().unwrap().unwrap();
+    let SbfBlock::GpsNav(gps_nav) = block else {
+        panic!("expected GPSNav");
+    };
+    assert_eq!(gps_nav.prn, 1);
+    assert_eq!(gps_nav.wn, 319);
+    assert_eq!(gps_nav.iode2, 229);
+    assert_eq!(gps_nav.iode3, 229);
+    assert!(reader.read_block().unwrap().is_none());
+}
+
+#[test]
+fn repository_geo_service_level_fixture_respects_reserved_byte() {
+    // GEOServiceLevel block from SbfParser/sbf_files/large_0000.sbf.
+    let fixture = decode_hex("24403e4b1d17200018993b183d09880000000000000f01084814d8ff28000101");
+    assert_eq!(fixture.len(), 32);
+
+    let mut reader = Cursor::new(fixture).sbf_blocks();
+    let block = reader.read_block().unwrap().unwrap();
+    let SbfBlock::GeoServiceLevel(service) = block else {
+        panic!("expected GEOServiceLevel");
+    };
+    assert_eq!(service.prn, 136);
+    assert_eq!(service.iods, 0);
+    assert_eq!(service.n, 1);
+    assert_eq!(service.sb_length, 8);
+    assert_eq!(service.regions.len(), 1);
+    assert_eq!(service.regions[0].latitude1, 72);
+    assert_eq!(service.regions[0].latitude2, 20);
+    assert_eq!(service.regions[0].longitude1, -40);
+    assert_eq!(service.regions[0].longitude2, 40);
+    assert_eq!(service.regions[0].region_shape, 1);
+    assert!(reader.read_block().unwrap().is_none());
 }
 
 /// A `Read` that replays a scripted sequence of results, including transient
