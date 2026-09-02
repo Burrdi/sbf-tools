@@ -122,7 +122,9 @@ impl SbfBlockParse for GpsNavBlock {
     const BLOCK_ID: u16 = block_ids::GPS_NAV;
 
     fn parse(header: &SbfHeader, data: &[u8]) -> SbfResult<Self> {
-        if data.len() < 140 {
+        // `data` starts at the CRC field, two bytes after the beginning of the
+        // complete 140-byte GPSNav block.
+        if data.len() < 138 {
             return Err(SbfError::ParseError("GPSNav too short".into()));
         }
 

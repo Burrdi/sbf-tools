@@ -164,8 +164,20 @@ impl<R: Read> SbfReader<R> {
                         self.stats.crc_errors += 1;
                         self.stats.bytes_skipped += 1;
                     }
+                    Err(error @ SbfError::ParseError(_)) => {
+                        // Header, declared length, and CRC have already been
+                        // validated by try_parse_block. Consume this complete
+                        // known block and expose the typed-parser failure to the
+                        // caller instead of silently losing it during resync.
+                        let declared_len =
+                            u16::from_le_bytes([self.buffer[6], self.buffer[7]]) as usize;
+                        self.buffer.drain(0..declared_len);
+                        self.stats.parse_errors += 1;
+                        return Err(error);
+                    }
                     Err(_) => {
-                        // Other parse error - skip sync and continue
+                        // Invalid header or another error without a trusted
+                        // complete-block boundary: skip sync and resynchronize.
                         self.buffer.remove(0);
                         self.stats.parse_errors += 1;
                         self.stats.bytes_skipped += 1;
